@@ -168,4 +168,31 @@ class ExampleRobolectricTest {
         assertTrue(notesAfterDelete.isEmpty())
         assertFalse(tempFile.exists()) // File was deleted from disk
     }
+
+    @Test
+    fun roomDao_and_repository_updateTranscription() = runBlocking {
+        val entity = VoiceNoteEntity(
+            title = "Lecture on AI",
+            filePath = "/lecture.m4a",
+            durationMs = 60000L,
+            fileSizeBytes = 120000L,
+            createdAtTimestamp = System.currentTimeMillis()
+        )
+        val id = dao.insertVoiceNote(entity)
+
+        // Initially null
+        var note = dao.getVoiceNoteById(id)
+        assertTrue(note?.transcription.isNullOrBlank())
+
+        // Update transcription via repository
+        val testTranscript = "Welcome to the lecture on artificial intelligence and speech processing."
+        repository.updateTranscription(id, testTranscript)
+
+        note = dao.getVoiceNoteById(id)
+        assertEquals(testTranscript, note?.transcription)
+
+        // Verify domain mapping
+        val domainNote = repository.getNoteById(id)
+        assertEquals(testTranscript, domainNote?.transcription)
+    }
 }

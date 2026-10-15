@@ -141,4 +141,5 @@ dependencies {
   debugImplementation(libs.androidx.compose.ui.tooling)
   "ksp"(libs.androidx.room.compiler)
   "ksp"(libs.moshi.kotlin.codegen)
+  implementation("dev.ffmpegkit-maintained:whisper-android:1.0.0")
 }

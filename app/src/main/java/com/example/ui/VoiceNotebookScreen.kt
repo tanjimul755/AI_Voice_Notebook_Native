@@ -68,6 +68,7 @@ import com.example.ui.components.NoteItemCard
 import com.example.ui.components.PermissionRationaleCard
 import com.example.ui.components.RecordingBottomBar
 import com.example.ui.components.SaveNoteDialog
+import com.example.ui.components.TranscribeDialog
 
 /**
  * Main application screen for AI Voice Notebook.
@@ -317,11 +318,13 @@ fun VoiceNotebookScreen(
                             isPlaying = isCurrent && uiState.playbackState.isPlaying,
                             currentPositionMs = if (isCurrent) uiState.playbackState.currentPositionMs else 0L,
                             playbackDurationMs = if (isCurrent) uiState.playbackState.durationMs else note.durationMs,
+                            isTranscribing = uiState.transcribingNoteId == note.id,
                             onTogglePlay = { viewModel.togglePlayNote(note) },
                             onSeek = { seekPos -> viewModel.seekPlayback(seekPos) },
                             onToggleStar = { viewModel.toggleStarred(note) },
                             onEditTitle = { viewModel.promptEditTitle(note) },
-                            onDelete = { viewModel.promptDeleteNote(note) }
+                            onDelete = { viewModel.promptDeleteNote(note) },
+                            onTranscribe = { viewModel.promptTranscribe(note) }
                         )
                     }
                 }
@@ -356,5 +359,21 @@ fun VoiceNotebookScreen(
             onConfirm = { viewModel.confirmDeleteNote() },
             onDismiss = { viewModel.dismissDeleteDialog() }
         )
+    }
+
+    // Offline Transcription Dialog
+    uiState.activeTranscribeDialogNote?.let { note ->
+        uiState.modelStatus?.let { status ->
+            TranscribeDialog(
+                note = note,
+                modelStatus = status,
+                isDownloadingModel = uiState.isDownloadingModel,
+                downloadProgress = uiState.modelDownloadProgress,
+                isTranscribing = uiState.transcribingNoteId == note.id,
+                onDownloadModel = { viewModel.downloadWhisperModel() },
+                onStartTranscribe = { language -> viewModel.startTranscribe(note, language) },
+                onDismiss = { viewModel.dismissTranscribeDialog() }
+            )
+        }
     }
 }

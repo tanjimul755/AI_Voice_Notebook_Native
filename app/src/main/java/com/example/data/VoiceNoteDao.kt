@@ -43,6 +43,9 @@ interface VoiceNoteDao {
     @Query("UPDATE voice_notes SET title = :newTitle WHERE id = :id")
     suspend fun updateTitle(id: Long, newTitle: String)
 
+    @Query("UPDATE voice_notes SET transcription = :transcription WHERE id = :id")
+    suspend fun updateTranscription(id: Long, transcription: String)
+
     @Query("UPDATE voice_notes SET isStarred = NOT isStarred WHERE id = :id")
     suspend fun toggleStarred(id: Long)
 }

@@ -12,6 +12,10 @@ import com.example.data.AppDatabase
 import com.example.data.VoiceNoteRepository
 import com.example.data.VoiceNoteRepositoryImpl
 import com.example.model.VoiceNote
+import com.example.transcription.AudioTranscriber
+import com.example.transcription.WhisperAudioTranscriber
+import com.example.transcription.WhisperModelStatus
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -52,7 +56,12 @@ data class NotebookUiState(
     val pendingDurationMs: Long = 0L,
     val proposedTitle: String = "",
     val editingNote: VoiceNote? = null,
-    val noteToDelete: VoiceNote? = null
+    val noteToDelete: VoiceNote? = null,
+    val transcribingNoteId: Long? = null,
+    val activeTranscribeDialogNote: VoiceNote? = null,
+    val modelStatus: WhisperModelStatus? = null,
+    val isDownloadingModel: Boolean = false,
+    val modelDownloadProgress: Float? = null
 )
 
 private data class DialogsAndMessages(
@@ -63,7 +72,12 @@ private data class DialogsAndMessages(
     val editingNote: VoiceNote? = null,
     val noteToDelete: VoiceNote? = null,
     val errorMessage: String? = null,
-    val infoMessage: String? = null
+    val infoMessage: String? = null,
+    val transcribingNoteId: Long? = null,
+    val activeTranscribeDialogNote: VoiceNote? = null,
+    val modelStatus: WhisperModelStatus? = null,
+    val isDownloadingModel: Boolean = false,
+    val modelDownloadProgress: Float? = null
 )
 
 class VoiceNoteViewModel(
@@ -71,7 +85,8 @@ class VoiceNoteViewModel(
     private val repository: VoiceNoteRepository,
     private val audioRecorder: AudioRecorder,
     private val audioPlayer: AudioPlayer,
-    private val audioFileManager: AudioFileManager
+    private val audioFileManager: AudioFileManager,
+    private val audioTranscriber: AudioTranscriber = WhisperAudioTranscriber(application)
 ) : AndroidViewModel(application) {
 
     private val _searchQuery = MutableStateFlow("")
@@ -115,7 +130,12 @@ class VoiceNoteViewModel(
             pendingDurationMs = dm.pendingDurationMs,
             proposedTitle = dm.proposedTitle,
             editingNote = dm.editingNote,
-            noteToDelete = dm.noteToDelete
+            noteToDelete = dm.noteToDelete,
+            transcribingNoteId = dm.transcribingNoteId,
+            activeTranscribeDialogNote = dm.activeTranscribeDialogNote,
+            modelStatus = dm.modelStatus,
+            isDownloadingModel = dm.isDownloadingModel,
+            modelDownloadProgress = dm.modelDownloadProgress
         )
     }.stateIn(
         scope = viewModelScope,
@@ -423,12 +443,103 @@ class VoiceNoteViewModel(
         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(infoMessage = null)
     }
 
+    // --- Offline Speech-to-Text Transcription Actions ---
+
+    fun promptTranscribe(note: VoiceNote) {
+        val status = audioTranscriber.getModelStatus()
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            activeTranscribeDialogNote = note,
+            modelStatus = status
+        )
+    }
+
+    fun dismissTranscribeDialog() {
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            activeTranscribeDialogNote = null,
+            modelDownloadProgress = null
+        )
+    }
+
+    fun downloadWhisperModel() {
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            isDownloadingModel = true,
+            modelDownloadProgress = 0f
+        )
+        viewModelScope.launch {
+            val result = audioTranscriber.downloadModel { progress ->
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    modelDownloadProgress = progress
+                )
+            }
+            if (result.isSuccess) {
+                val updatedStatus = audioTranscriber.getModelStatus()
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    isDownloadingModel = false,
+                    modelDownloadProgress = null,
+                    modelStatus = updatedStatus,
+                    infoMessage = "Whisper model downloaded successfully. Ready for offline transcription."
+                )
+            } else {
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    isDownloadingModel = false,
+                    modelDownloadProgress = null,
+                    errorMessage = "Failed to download model: ${result.exceptionOrNull()?.message}"
+                )
+            }
+        }
+    }
+
+    fun startTranscribe(note: VoiceNote, language: String = "auto") {
+        val audioFile = File(note.filePath)
+        if (!audioFile.exists() || audioFile.length() == 0L) {
+            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                activeTranscribeDialogNote = null,
+                errorMessage = "Audio file not found on device storage"
+            )
+            return
+        }
+
+        val status = audioTranscriber.getModelStatus()
+        if (!status.isAvailable) {
+            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                modelStatus = status,
+                errorMessage = "Offline Whisper model is not downloaded yet. Please download it first."
+            )
+            return
+        }
+
+        // Close dialog and show active transcription on note
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            activeTranscribeDialogNote = null,
+            transcribingNoteId = note.id,
+            infoMessage = "Transcribing voice note locally... Please wait."
+        )
+
+        viewModelScope.launch {
+            val result = audioTranscriber.transcribe(audioFile, language)
+            if (result.isSuccess) {
+                val transcript = result.getOrThrow()
+                repository.updateTranscription(note.id, transcript)
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    transcribingNoteId = null,
+                    infoMessage = "Transcription saved to note"
+                )
+            } else {
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    transcribingNoteId = null,
+                    errorMessage = "Transcription failed: ${result.exceptionOrNull()?.message}"
+                )
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         recordingTimerJob?.cancel()
         playbackPollingJob?.cancel()
         audioRecorder.cancel()
         audioPlayer.release()
+        audioTranscriber.release()
     }
 
     companion object {
@@ -441,12 +552,14 @@ class VoiceNoteViewModel(
                     val repo = VoiceNoteRepositoryImpl(db.voiceNoteDao(), fileManager)
                     val recorder = AndroidAudioRecorder(application)
                     val player = AndroidAudioPlayer(application)
+                    val transcriber = WhisperAudioTranscriber(application)
                     return VoiceNoteViewModel(
                         application = application,
                         repository = repo,
                         audioRecorder = recorder,
                         audioPlayer = player,
-                        audioFileManager = fileManager
+                        audioFileManager = fileManager,
+                        audioTranscriber = transcriber
                     ) as T
                 }
             }
