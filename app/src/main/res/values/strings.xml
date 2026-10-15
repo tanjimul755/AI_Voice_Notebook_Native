@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">AI Voice Notebook</string>
+    <string name="record_audio_permission_title">Microphone Access Required</string>
+    <string name="record_audio_permission_description">AI Voice Notebook needs access to your device microphone to record high-quality voice notes locally.</string>
+    <string name="grant_permission">Grant Permission</string>
+    <string name="permission_denied_warning">Microphone permission was denied. Please grant permission in App Settings to record voice notes.</string>
+    <string name="open_settings">Open Settings</string>
+</resources>
