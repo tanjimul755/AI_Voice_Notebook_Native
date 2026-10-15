@@ -195,4 +195,27 @@ class ExampleRobolectricTest {
         val domainNote = repository.getNoteById(id)
         assertEquals(testTranscript, domainNote?.transcription)
     }
+
+    @Test
+    fun autoTranscription_workflowUpdatesRoomAndUi() = runBlocking {
+        val tempFile = File(context.filesDir, "test_speech.m4a")
+        tempFile.writeText("test audio")
+
+        val saved = repository.saveNote(
+            title = "Test Speech",
+            file = tempFile,
+            durationMs = 15000L,
+            tags = "Test"
+        )
+        assertNotNull(saved)
+        assertEquals("Test Speech", saved.title)
+        assertTrue(saved.transcription.isNullOrBlank())
+
+        val simulatedTranscription = "This is automatically transcribed offline speech."
+        repository.updateTranscription(saved.id, simulatedTranscription)
+
+        val updated = repository.getNoteById(saved.id)
+        assertNotNull(updated)
+        assertEquals(simulatedTranscription, updated?.transcription)
+    }
 }

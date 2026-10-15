@@ -25,6 +25,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -99,6 +101,9 @@ class VoiceNoteViewModel(
     private var lastResumeTimestamp: Long = 0L
 
     private var playbackPollingJob: Job? = null
+
+    private val transcriptionMutex = Mutex()
+    private var preferredLanguage: String = "auto"
 
     // Combined reactive UI State flow (exactly 5 flows for standard type-safe combine)
     val uiState: StateFlow<NotebookUiState> = combine(
@@ -248,19 +253,34 @@ class VoiceNoteViewModel(
         if (file != null) {
             viewModelScope.launch {
                 try {
-                    repository.saveNote(
+                    val savedNote = repository.saveNote(
                         title = title.ifBlank { _dialogsAndMessages.value.proposedTitle },
                         file = file,
                         durationMs = duration,
                         tags = tags
                     )
-                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                        isSaveDialogVisible = false,
-                        pendingSavedFile = null,
-                        pendingDurationMs = 0L,
-                        proposedTitle = "",
-                        infoMessage = "Voice note saved successfully"
-                    )
+
+                    val modelStatus = audioTranscriber.getModelStatus()
+                    if (modelStatus.isAvailable) {
+                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                            isSaveDialogVisible = false,
+                            pendingSavedFile = null,
+                            pendingDurationMs = 0L,
+                            proposedTitle = "",
+                            infoMessage = "Voice note saved. Transcribing automatically..."
+                        )
+                        startTranscribe(savedNote, preferredLanguage)
+                    } else {
+                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                            isSaveDialogVisible = false,
+                            pendingSavedFile = null,
+                            pendingDurationMs = 0L,
+                            proposedTitle = "",
+                            activeTranscribeDialogNote = savedNote,
+                            modelStatus = modelStatus,
+                            infoMessage = "Voice note saved. Offline Whisper model required for transcription."
+                        )
+                    }
                 } catch (e: Exception) {
                     _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                         isSaveDialogVisible = false,
@@ -473,12 +493,17 @@ class VoiceNoteViewModel(
             }
             if (result.isSuccess) {
                 val updatedStatus = audioTranscriber.getModelStatus()
+                val waitingNote = _dialogsAndMessages.value.activeTranscribeDialogNote
                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                     isDownloadingModel = false,
                     modelDownloadProgress = null,
                     modelStatus = updatedStatus,
                     infoMessage = "Whisper model downloaded successfully. Ready for offline transcription."
                 )
+                // If a note was waiting for the model to download, start transcription automatically
+                if (waitingNote != null && updatedStatus.isAvailable) {
+                    startTranscribe(waitingNote, preferredLanguage)
+                }
             } else {
                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                     isDownloadingModel = false,
@@ -489,7 +514,14 @@ class VoiceNoteViewModel(
         }
     }
 
-    fun startTranscribe(note: VoiceNote, language: String = "auto") {
+    fun startTranscribe(note: VoiceNote, language: String = preferredLanguage) {
+        preferredLanguage = language
+
+        // Prevent duplicate transcription job on the same note
+        if (_dialogsAndMessages.value.transcribingNoteId == note.id) {
+            return
+        }
+
         val audioFile = File(note.filePath)
         if (!audioFile.exists() || audioFile.length() == 0L) {
             _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
@@ -503,6 +535,7 @@ class VoiceNoteViewModel(
         if (!status.isAvailable) {
             _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                 modelStatus = status,
+                activeTranscribeDialogNote = note,
                 errorMessage = "Offline Whisper model is not downloaded yet. Please download it first."
             )
             return
@@ -516,19 +549,28 @@ class VoiceNoteViewModel(
         )
 
         viewModelScope.launch {
-            val result = audioTranscriber.transcribe(audioFile, language)
-            if (result.isSuccess) {
-                val transcript = result.getOrThrow()
-                repository.updateTranscription(note.id, transcript)
-                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                    transcribingNoteId = null,
-                    infoMessage = "Transcription saved to note"
-                )
-            } else {
-                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                    transcribingNoteId = null,
-                    errorMessage = "Transcription failed: ${result.exceptionOrNull()?.message}"
-                )
+            transcriptionMutex.withLock {
+                try {
+                    val result = audioTranscriber.transcribe(audioFile, language)
+                    if (result.isSuccess) {
+                        val transcript = result.getOrThrow()
+                        repository.updateTranscription(note.id, transcript)
+                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                            transcribingNoteId = null,
+                            infoMessage = "Transcription saved to note"
+                        )
+                    } else {
+                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                            transcribingNoteId = null,
+                            errorMessage = "Transcription failed: ${result.exceptionOrNull()?.message}"
+                        )
+                    }
+                } catch (e: Exception) {
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        transcribingNoteId = null,
+                        errorMessage = "Transcription failed: ${e.message}"
+                    )
+                }
             }
         }
     }
