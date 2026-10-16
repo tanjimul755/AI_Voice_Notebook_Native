@@ -50,6 +50,10 @@ class AndroidAudioRecorder(
                 setAudioEncodingBitRate(128000)
                 setAudioSamplingRate(44100)
                 setOutputFile(outputFile.absolutePath)
+                setOnErrorListener { _, what, extra ->
+                    Log.e(TAG, "MediaRecorder error: what=$what, extra=$extra")
+                    cleanup()
+                }
                 prepare()
                 start()
             }
@@ -156,11 +160,16 @@ class AndroidAudioRecorder(
 
     private fun cleanup() {
         try {
-            recorder?.apply {
+            recorder?.let { r ->
                 try {
-                    stop()
+                    r.stop()
                 } catch (_: Exception) {}
-                release()
+                try {
+                    r.reset()
+                } catch (_: Exception) {}
+                try {
+                    r.release()
+                } catch (_: Exception) {}
             }
         } catch (e: Exception) {
             Log.e(TAG, "Error cleaning up recorder", e)

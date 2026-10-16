@@ -173,7 +173,9 @@ object AudioDecoder {
             totalPcmBytesWritten += resampledBytes.size
 
             fos.flush()
-            fos.close()
+            try {
+                fos.close()
+            } catch (_: Exception) {}
 
             // Update WAV header with actual data size
             updateWavHeader(outputFile, totalPcmBytesWritten, TARGET_SAMPLE_RATE, 1)
@@ -188,6 +190,8 @@ object AudioDecoder {
         } finally {
             try {
                 codec?.stop()
+            } catch (_: Exception) {}
+            try {
                 codec?.release()
             } catch (_: Exception) {}
             try {

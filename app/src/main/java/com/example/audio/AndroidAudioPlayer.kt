@@ -63,12 +63,14 @@ class AndroidAudioPlayer(
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .build()
                 )
-                setDataSource(context, Uri.fromFile(file))
+                setDataSource(file.absolutePath)
                 setOnCompletionListener {
+                    stop()
                     onCompletionCallback?.invoke()
                 }
                 setOnErrorListener { _, what, extra ->
                     Log.e(TAG, "MediaPlayer error: what=$what, extra=$extra")
+                    stop()
                     onError("Playback error ($what, $extra)")
                     true
                 }
@@ -105,12 +107,24 @@ class AndroidAudioPlayer(
 
     override fun stop() {
         try {
-            player?.apply {
-                if (isPlaying) {
-                    stop()
+            player?.let { p ->
+                try {
+                    if (p.isPlaying) {
+                        p.stop()
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Exception during player.stop()", e)
                 }
-                reset()
-                release()
+                try {
+                    p.reset()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Exception during player.reset()", e)
+                }
+                try {
+                    p.release()
+                } catch (e: Exception) {
+                    Log.w(TAG, "Exception during player.release()", e)
+                }
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed to stop/release MediaPlayer", e)

@@ -218,4 +218,58 @@ class ExampleRobolectricTest {
         assertNotNull(updated)
         assertEquals(simulatedTranscription, updated?.transcription)
     }
+
+    @Test
+    fun geminiTranscriptionFormats_containsAllRequiredOptions() {
+        val formats = com.example.transcription.GeminiTranscriptionFormat.values()
+        assertEquals(4, formats.size)
+
+        val formatIds = formats.map { it.id }
+        assertTrue(formatIds.contains("auto"))
+        assertTrue(formatIds.contains("pure_bangla"))
+        assertTrue(formatIds.contains("romanized_bangla"))
+        assertTrue(formatIds.contains("english"))
+
+        // Verify Banglish instruction contains phonetic latin guidance
+        val romanized = formats.first { it.id == "romanized_bangla" }
+        assertTrue(romanized.instruction.contains("Roman/Latin"))
+
+        // Verify Pure Bangla instruction requires Bengali script
+        val pureBangla = formats.first { it.id == "pure_bangla" }
+        assertTrue(pureBangla.instruction.contains("বাংলা"))
+    }
+
+    @Test
+    fun geminiAudioTranscriber_missingFileOrApiKeyHandledSafely() = runBlocking {
+        val transcriber = com.example.transcription.GeminiAudioTranscriber(context)
+        val nonExistentFile = File(context.filesDir, "does_not_exist.m4a")
+
+        val result = transcriber.transcribeAudio(nonExistentFile)
+        assertTrue(result.isFailure)
+        assertNotNull(result.exceptionOrNull())
+    }
+
+    @Test
+    fun geminiTranscription_updatesRoomDatabaseAndPreservesOriginalRecording() = runBlocking {
+        val tempFile = File(context.filesDir, "bangla_recording.m4a")
+        tempFile.writeText("sample audio content")
+
+        val note = repository.saveNote(
+            title = "Bangla Meeting Note",
+            file = tempFile,
+            durationMs = 28000L,
+            tags = "Office"
+        )
+        assertNotNull(note)
+
+        // Simulate improved Gemini transcription with mixed Bangla-English (Banglish)
+        val banglaTranscript = "Ajke meeting e shobai present chilo. Amra new feature finalize korechi."
+        repository.updateTranscription(note.id, banglaTranscript)
+
+        val updatedNote = repository.getNoteById(note.id)
+        assertNotNull(updatedNote)
+        assertEquals(banglaTranscript, updatedNote?.transcription)
+        assertTrue(tempFile.exists()) // Audio file is preserved
+        assertEquals("Bangla Meeting Note", updatedNote?.title)
+    }
 }

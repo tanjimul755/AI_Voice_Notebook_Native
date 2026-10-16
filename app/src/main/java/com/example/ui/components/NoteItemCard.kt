@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -32,6 +33,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
@@ -70,12 +72,14 @@ fun NoteItemCard(
     currentPositionMs: Long,
     playbackDurationMs: Long,
     isTranscribing: Boolean = false,
+    isAiTranscribing: Boolean = false,
     onTogglePlay: () -> Unit,
     onSeek: (Long) -> Unit,
     onToggleStar: () -> Unit,
     onEditTitle: () -> Unit,
     onDelete: () -> Unit,
     onTranscribe: () -> Unit = {},
+    onAiTranscribe: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -171,7 +175,22 @@ fun NoteItemCard(
                         onDismissRequest = { showMenu = false }
                     ) {
                         DropdownMenuItem(
-                            text = { Text(if (note.transcription.isNullOrBlank()) "Transcribe Audio" else "Re-transcribe Audio") },
+                            text = { Text("Transcribe with AI (Gemini)") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.AutoAwesome,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                onAiTranscribe()
+                            },
+                            modifier = Modifier.testTag("ai_transcribe_menu_item_${note.id}")
+                        )
+                        DropdownMenuItem(
+                            text = { Text(if (note.transcription.isNullOrBlank()) "Transcribe (Offline Whisper)" else "Re-transcribe (Offline)") },
                             leadingIcon = { Icon(Icons.Default.Subtitles, contentDescription = null) },
                             onClick = {
                                 showMenu = false
@@ -330,7 +349,61 @@ fun NoteItemCard(
             // Transcription section / Transcribe Action
             Spacer(modifier = Modifier.height(12.dp))
 
-            if (!note.transcription.isNullOrBlank()) {
+            if (isAiTranscribing) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("ai_transcribing_indicator_${note.id}")
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Transcribing with Gemini AI...",
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                        )
+                    }
+                }
+            } else if (isTranscribing) {
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Text(
+                            text = "Transcribing audio locally on device...",
+                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            } else if (!note.transcription.isNullOrBlank()) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
@@ -364,7 +437,7 @@ fun NoteItemCard(
                             }
 
                             val clipboardManager = LocalClipboardManager.current
-                            Row {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
                                 IconButton(
                                     onClick = {
                                         clipboardManager.setText(AnnotatedString(note.transcription))
@@ -381,6 +454,19 @@ fun NoteItemCard(
                                     )
                                 }
                                 IconButton(
+                                    onClick = onAiTranscribe,
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .testTag("ai_retranscribe_button_${note.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.AutoAwesome,
+                                        contentDescription = "Transcribe with Gemini AI",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                                IconButton(
                                     onClick = onTranscribe,
                                     modifier = Modifier
                                         .size(28.dp)
@@ -388,7 +474,7 @@ fun NoteItemCard(
                                 ) {
                                     Icon(
                                         imageVector = Icons.Default.Refresh,
-                                        contentDescription = "Re-transcribe",
+                                        contentDescription = "Re-transcribe offline",
                                         modifier = Modifier.size(16.dp),
                                         tint = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -406,54 +492,57 @@ fun NoteItemCard(
                         )
                     }
                 }
-            } else if (isTranscribing) {
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
-                    modifier = Modifier.fillMaxWidth()
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
+                    FilledTonalButton(
+                        onClick = onAiTranscribe,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(18.dp),
-                            strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary
+                            .weight(1.1f)
+                            .height(38.dp)
+                            .testTag("ai_transcribe_button_${note.id}"),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Transcribing audio locally on device...",
-                            style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                            color = MaterialTheme.colorScheme.primary
+                            text = "AI Transcribe",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
                         )
                     }
-                }
-            } else {
-                OutlinedButton(
-                    onClick = onTranscribe,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(38.dp)
-                        .testTag("transcribe_note_button_${note.id}"),
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(
-                        contentColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Icon(
-                        imageVector = Icons.Default.Subtitles,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Transcribe Voice Note (Offline)",
-                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
-                    )
+
+                    OutlinedButton(
+                        onClick = onTranscribe,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(38.dp)
+                            .testTag("transcribe_note_button_${note.id}"),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            contentColor = MaterialTheme.colorScheme.primary
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Subtitles,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Offline Whisper",
+                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+                        )
+                    }
                 }
             }
         }

@@ -64,6 +64,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.components.DeleteConfirmationDialog
 import com.example.ui.components.EditTitleDialog
+import com.example.ui.components.GeminiTranscribeDialog
 import com.example.ui.components.NoteItemCard
 import com.example.ui.components.PermissionRationaleCard
 import com.example.ui.components.RecordingBottomBar
@@ -319,12 +320,14 @@ fun VoiceNotebookScreen(
                             currentPositionMs = if (isCurrent) uiState.playbackState.currentPositionMs else 0L,
                             playbackDurationMs = if (isCurrent) uiState.playbackState.durationMs else note.durationMs,
                             isTranscribing = uiState.transcribingNoteId == note.id,
+                            isAiTranscribing = uiState.aiTranscribingNoteId == note.id,
                             onTogglePlay = { viewModel.togglePlayNote(note) },
                             onSeek = { seekPos -> viewModel.seekPlayback(seekPos) },
                             onToggleStar = { viewModel.toggleStarred(note) },
                             onEditTitle = { viewModel.promptEditTitle(note) },
                             onDelete = { viewModel.promptDeleteNote(note) },
-                            onTranscribe = { viewModel.promptTranscribe(note) }
+                            onTranscribe = { viewModel.promptTranscribe(note) },
+                            onAiTranscribe = { viewModel.promptAiTranscribe(note) }
                         )
                     }
                 }
@@ -361,7 +364,7 @@ fun VoiceNotebookScreen(
         )
     }
 
-    // Offline Transcription Dialog
+    // Offline Whisper Transcription Dialog
     uiState.activeTranscribeDialogNote?.let { note ->
         uiState.modelStatus?.let { status ->
             TranscribeDialog(
@@ -375,5 +378,16 @@ fun VoiceNotebookScreen(
                 onDismiss = { viewModel.dismissTranscribeDialog() }
             )
         }
+    }
+
+    // Google Gemini AI Transcription Dialog
+    uiState.activeAiTranscribeDialogNote?.let { note ->
+        GeminiTranscribeDialog(
+            note = note,
+            isApiKeyConfigured = uiState.isGeminiApiKeyConfigured,
+            isTranscribing = uiState.aiTranscribingNoteId == note.id,
+            onConfirm = { format -> viewModel.startAiTranscribe(note, format) },
+            onDismiss = { viewModel.dismissAiTranscribeDialog() }
+        )
     }
 }

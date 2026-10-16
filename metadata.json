@@ -1,5 +1,5 @@
 {
-  "name": "Remix AI Voice Notebook",
+  "name": "AI Voice Notebook",
   "description": "Voice-first notebook to record, pause/resume, playback, organize, and manage local audio voice notes with native Android APIs.",
   "requestFramePermissions": [],
   "majorCapabilities": [

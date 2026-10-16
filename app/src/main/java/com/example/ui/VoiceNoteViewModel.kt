@@ -13,6 +13,8 @@ import com.example.data.VoiceNoteRepository
 import com.example.data.VoiceNoteRepositoryImpl
 import com.example.model.VoiceNote
 import com.example.transcription.AudioTranscriber
+import com.example.transcription.GeminiAudioTranscriber
+import com.example.transcription.GeminiTranscriptionFormat
 import com.example.transcription.WhisperAudioTranscriber
 import com.example.transcription.WhisperModelStatus
 import kotlinx.coroutines.Dispatchers
@@ -63,7 +65,10 @@ data class NotebookUiState(
     val activeTranscribeDialogNote: VoiceNote? = null,
     val modelStatus: WhisperModelStatus? = null,
     val isDownloadingModel: Boolean = false,
-    val modelDownloadProgress: Float? = null
+    val modelDownloadProgress: Float? = null,
+    val aiTranscribingNoteId: Long? = null,
+    val activeAiTranscribeDialogNote: VoiceNote? = null,
+    val isGeminiApiKeyConfigured: Boolean = false
 )
 
 private data class DialogsAndMessages(
@@ -79,7 +84,9 @@ private data class DialogsAndMessages(
     val activeTranscribeDialogNote: VoiceNote? = null,
     val modelStatus: WhisperModelStatus? = null,
     val isDownloadingModel: Boolean = false,
-    val modelDownloadProgress: Float? = null
+    val modelDownloadProgress: Float? = null,
+    val aiTranscribingNoteId: Long? = null,
+    val activeAiTranscribeDialogNote: VoiceNote? = null
 )
 
 class VoiceNoteViewModel(
@@ -88,7 +95,8 @@ class VoiceNoteViewModel(
     private val audioRecorder: AudioRecorder,
     private val audioPlayer: AudioPlayer,
     private val audioFileManager: AudioFileManager,
-    private val audioTranscriber: AudioTranscriber = WhisperAudioTranscriber(application)
+    private val audioTranscriber: AudioTranscriber = WhisperAudioTranscriber(application),
+    private val geminiTranscriber: GeminiAudioTranscriber = GeminiAudioTranscriber(application)
 ) : AndroidViewModel(application) {
 
     private val _searchQuery = MutableStateFlow("")
@@ -140,7 +148,10 @@ class VoiceNoteViewModel(
             activeTranscribeDialogNote = dm.activeTranscribeDialogNote,
             modelStatus = dm.modelStatus,
             isDownloadingModel = dm.isDownloadingModel,
-            modelDownloadProgress = dm.modelDownloadProgress
+            modelDownloadProgress = dm.modelDownloadProgress,
+            aiTranscribingNoteId = dm.aiTranscribingNoteId,
+            activeAiTranscribeDialogNote = dm.activeAiTranscribeDialogNote,
+            isGeminiApiKeyConfigured = geminiTranscriber.isApiKeyConfigured()
         )
     }.stateIn(
         scope = viewModelScope,
@@ -575,6 +586,83 @@ class VoiceNoteViewModel(
         }
     }
 
+    // --- Google Gemini AI Audio Transcription Actions ---
+
+    fun promptAiTranscribe(note: VoiceNote) {
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            activeAiTranscribeDialogNote = note
+        )
+    }
+
+    fun dismissAiTranscribeDialog() {
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            activeAiTranscribeDialogNote = null
+        )
+    }
+
+    fun startAiTranscribe(
+        note: VoiceNote,
+        format: GeminiTranscriptionFormat = GeminiTranscriptionFormat.AUTO
+    ) {
+        // Prevent duplicate concurrent transcription on the same note
+        if (_dialogsAndMessages.value.aiTranscribingNoteId == note.id ||
+            _dialogsAndMessages.value.transcribingNoteId == note.id
+        ) {
+            return
+        }
+
+        val audioFile = File(note.filePath)
+        if (!audioFile.exists() || audioFile.length() == 0L) {
+            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                activeAiTranscribeDialogNote = null,
+                errorMessage = "Audio file not found on device storage"
+            )
+            return
+        }
+
+        if (!geminiTranscriber.isApiKeyConfigured()) {
+            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                activeAiTranscribeDialogNote = null,
+                errorMessage = "Gemini API key is not configured. Please set your GEMINI_API_KEY in the Secrets panel in AI Studio."
+            )
+            return
+        }
+
+        // Close dialog and show active AI transcription indicator
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            activeAiTranscribeDialogNote = null,
+            aiTranscribingNoteId = note.id,
+            infoMessage = "Transcribing with Gemini AI (${format.displayName})... Please wait."
+        )
+
+        viewModelScope.launch {
+            transcriptionMutex.withLock {
+                try {
+                    val result = geminiTranscriber.transcribeAudio(audioFile, format)
+                    if (result.isSuccess) {
+                        val transcript = result.getOrThrow()
+                        repository.updateTranscription(note.id, transcript)
+                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                            aiTranscribingNoteId = null,
+                            infoMessage = "AI transcription completed (${format.displayName})"
+                        )
+                    } else {
+                        val err = result.exceptionOrNull()?.message ?: "Unknown error"
+                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                            aiTranscribingNoteId = null,
+                            errorMessage = "AI transcription failed: $err"
+                        )
+                    }
+                } catch (e: Exception) {
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        aiTranscribingNoteId = null,
+                        errorMessage = "AI transcription error: ${e.message}"
+                    )
+                }
+            }
+        }
+    }
+
     override fun onCleared() {
         super.onCleared()
         recordingTimerJob?.cancel()
@@ -595,13 +683,15 @@ class VoiceNoteViewModel(
                     val recorder = AndroidAudioRecorder(application)
                     val player = AndroidAudioPlayer(application)
                     val transcriber = WhisperAudioTranscriber(application)
+                    val geminiTranscriber = GeminiAudioTranscriber(application)
                     return VoiceNoteViewModel(
                         application = application,
                         repository = repo,
                         audioRecorder = recorder,
                         audioPlayer = player,
                         audioFileManager = fileManager,
-                        audioTranscriber = transcriber
+                        audioTranscriber = transcriber,
+                        geminiTranscriber = geminiTranscriber
                     ) as T
                 }
             }
