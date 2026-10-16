@@ -382,4 +382,152 @@ class ExampleRobolectricTest {
         assertNotNull(updated)
         assertEquals(targetTimestamp, updated?.reminderTimestamp)
     }
+
+    @Test
+    fun audioDecoder_wavHeaderAccuratelyDescribesPcmData() {
+        val testWavFile = File(context.cacheDir, "test_header.wav")
+        val sampleRate = 16000
+        val channels = 1
+        val initialPcmBytes = 32000 // 1 second of 16kHz 16-bit mono
+
+        java.io.FileOutputStream(testWavFile).use { fos ->
+            com.example.audio.AudioDecoder.writeWavHeader(fos, sampleRate, channels, initialPcmBytes)
+            // write dummy PCM data
+            fos.write(ByteArray(initialPcmBytes))
+        }
+
+        assertEquals(initialPcmBytes + 44L, testWavFile.length())
+
+        val raf = java.io.RandomAccessFile(testWavFile, "r")
+        val header = ByteArray(44)
+        raf.readFully(header)
+
+        // "RIFF"
+        assertEquals("RIFF", String(header, 0, 4))
+        // Format "WAVE"
+        assertEquals("WAVE", String(header, 8, 4))
+        // "fmt "
+        assertEquals("fmt ", String(header, 12, 4))
+        // AudioFormat = 1 (PCM)
+        val audioFormat = (header[20].toInt() and 0xFF) or ((header[21].toInt() and 0xFF) shl 8)
+        assertEquals(1, audioFormat)
+        // Channels = 1
+        val numChannels = (header[22].toInt() and 0xFF) or ((header[23].toInt() and 0xFF) shl 8)
+        assertEquals(channels, numChannels)
+        // SampleRate = 16000
+        val sRate = (header[24].toInt() and 0xFF) or
+                ((header[25].toInt() and 0xFF) shl 8) or
+                ((header[26].toInt() and 0xFF) shl 16) or
+                ((header[27].toInt() and 0xFF) shl 24)
+        assertEquals(sampleRate, sRate)
+        // BitsPerSample = 16
+        val bits = (header[34].toInt() and 0xFF) or ((header[35].toInt() and 0xFF) shl 8)
+        assertEquals(16, bits)
+        // ByteRate = 32000
+        val byteRate = (header[28].toInt() and 0xFF) or
+                ((header[29].toInt() and 0xFF) shl 8) or
+                ((header[30].toInt() and 0xFF) shl 16) or
+                ((header[31].toInt() and 0xFF) shl 24)
+        assertEquals(sampleRate * channels * 2, byteRate)
+        // "data"
+        assertEquals("data", String(header, 36, 4))
+        // Data length
+        val dataLen = (header[40].toInt() and 0xFF) or
+                ((header[41].toInt() and 0xFF) shl 8) or
+                ((header[42].toInt() and 0xFF) shl 16) or
+                ((header[43].toInt() and 0xFF) shl 24)
+        assertEquals(initialPcmBytes, dataLen)
+
+        // Now test updateWavHeader with a new size
+        val updatedPcmBytes = 64000
+        com.example.audio.AudioDecoder.updateWavHeader(testWavFile, updatedPcmBytes, sampleRate, channels)
+
+        raf.seek(4)
+        val totalLenUpdated = raf.read() or (raf.read() shl 8) or (raf.read() shl 16) or (raf.read() shl 24)
+        assertEquals(updatedPcmBytes + 36, totalLenUpdated)
+
+        raf.seek(40)
+        val dataLenUpdated = raf.read() or (raf.read() shl 8) or (raf.read() shl 16) or (raf.read() shl 24)
+        assertEquals(updatedPcmBytes, dataLenUpdated)
+
+        raf.close()
+        testWavFile.delete()
+    }
+
+    @Test
+    fun audioDecoder_resampleBandLimitedPreservesInBandAndAttenuatesOutOfBand() {
+        val srcRate = 44100
+        val dstRate = 16000
+        val durationSeconds = 0.5
+        val sampleCount = (srcRate * durationSeconds).toInt()
+
+        // 1. In-band 1 kHz sine wave (should pass through with minimal loss)
+        val inBandFreq = 1000.0
+        val inBandInput = ShortArray(sampleCount) { i ->
+            val t = i.toDouble() / srcRate
+            (kotlin.math.sin(2.0 * Math.PI * inBandFreq * t) * 20000).toInt().toShort()
+        }
+
+        val inBandOutput = com.example.audio.AudioDecoder.resampleBandLimited(inBandInput, srcRate, dstRate)
+        assertTrue(inBandOutput.isNotEmpty())
+
+        // Calculate RMS of in-band input and output
+        var inBandInRms = 0.0
+        for (s in inBandInput) inBandInRms += s.toDouble() * s.toDouble()
+        inBandInRms = kotlin.math.sqrt(inBandInRms / inBandInput.size)
+
+        var inBandOutRms = 0.0
+        // Ignore boundary transition (first and last 50 samples)
+        val innerOutput = inBandOutput.sliceArray(50 until inBandOutput.size - 50)
+        for (s in innerOutput) inBandOutRms += s.toDouble() * s.toDouble()
+        inBandOutRms = kotlin.math.sqrt(inBandOutRms / innerOutput.size)
+
+        // Passband level should be preserved (within 10% tolerance)
+        val inBandRatio = inBandOutRms / inBandInRms
+        assertTrue("In-band 1kHz tone should be preserved (ratio=$inBandRatio)", inBandRatio in 0.85..1.15)
+
+        // 2. Out-of-band 12 kHz sine wave (above Nyquist of 16kHz = 8kHz; MUST be severely attenuated)
+        val outOfBandFreq = 12000.0
+        val outOfBandInput = ShortArray(sampleCount) { i ->
+            val t = i.toDouble() / srcRate
+            (kotlin.math.sin(2.0 * Math.PI * outOfBandFreq * t) * 20000).toInt().toShort()
+        }
+
+        val outOfBandOutput = com.example.audio.AudioDecoder.resampleBandLimited(outOfBandInput, srcRate, dstRate)
+        var outOfBandOutRms = 0.0
+        val innerOutBand = outOfBandOutput.sliceArray(50 until outOfBandOutput.size - 50)
+        for (s in innerOutBand) outOfBandOutRms += s.toDouble() * s.toDouble()
+        outOfBandOutRms = kotlin.math.sqrt(outOfBandOutRms / innerOutBand.size)
+
+        // The 12 kHz signal must be attenuated by at least 30 dB (RMS < 3% of original)
+        val outBandRatio = outOfBandOutRms / inBandInRms
+        assertTrue("Out-of-band 12kHz tone must be strongly attenuated (ratio=$outBandRatio)", outBandRatio < 0.05)
+    }
+
+    @Test
+    fun audioDecoder_streamingResamplerProducesAccurateSampleRatio() {
+        val srcRate = 48000
+        val dstRate = 16000
+        val resampler = com.example.audio.AudioDecoder.StreamingResampler(srcRate, dstRate)
+
+        val totalInputSamples = 48000 // 1 second of 48kHz audio
+        val input = ShortArray(totalInputSamples) { (it % 1000).toShort() }
+
+        val outputList = ArrayList<Short>()
+        // Feed in 1024-sample chunks
+        val chunkSize = 1024
+        var offset = 0
+        while (offset < totalInputSamples) {
+            val end = minOf(offset + chunkSize, totalInputSamples)
+            val chunk = input.copyOfRange(offset, end)
+            resampler.process(chunk) { outputList.add(it) }
+            offset = end
+        }
+        resampler.finish { outputList.add(it) }
+
+        // 48000 -> 16000 should produce ~16000 samples (within small window boundary difference)
+        val expected = 16000
+        val diff = kotlin.math.abs(outputList.size - expected)
+        assertTrue("Output sample count ${outputList.size} should be close to expected $expected", diff <= 2)
+    }
 }

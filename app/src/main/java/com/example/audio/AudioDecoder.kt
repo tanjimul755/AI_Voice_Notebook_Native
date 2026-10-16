@@ -7,11 +7,14 @@ import android.util.Log
 import java.io.File
 import java.io.FileOutputStream
 import java.io.RandomAccessFile
-import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.roundToInt
+import kotlin.math.sin
 
 private const val TAG = "AudioDecoder"
-private const val TARGET_SAMPLE_RATE = 16000
+const val TARGET_SAMPLE_RATE = 16000
 private const val TIMEOUT_US = 5000L
 
 /**
@@ -19,8 +22,9 @@ private const val TIMEOUT_US = 5000L
  *
  * Whisper models require 16kHz 16-bit linear PCM mono WAV audio.
  * This class decodes saved .m4a (AAC in MP4 container) files using Android's
- * hardware/platform MediaExtractor and MediaCodec APIs, resamples to 16kHz mono,
- * and produces a temporary RIFF WAVE file ready for offline Whisper transcription.
+ * hardware MediaExtractor and MediaCodec APIs, properly detects dynamic format changes,
+ * downmixes multi-channel PCM to mono, applies a band-limited anti-aliased sinc resampler,
+ * streams the output directly to disk with minimal memory overhead, and writes standard RIFF WAV headers.
  */
 object AudioDecoder {
 
@@ -68,15 +72,15 @@ object AudioDecoder {
             codec.configure(inputFormat, null, null, 0)
             codec.start()
 
-            val srcSampleRate = if (inputFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+            var srcSampleRate = if (inputFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
                 inputFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
             } else 44100
 
-            val srcChannels = if (inputFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+            var srcChannels = if (inputFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
                 inputFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
             } else 1
 
-            // Prepare temporary output stream with placeholder WAV header
+            // Prepare temporary output stream with standard 44-byte WAV header placeholder
             val fos = FileOutputStream(outputFile)
             writeWavHeader(fos, TARGET_SAMPLE_RATE, 1, 0)
 
@@ -85,8 +89,23 @@ object AudioDecoder {
             var isOutputEOS = false
             var totalPcmBytesWritten = 0
 
-            // Accumulator for downmixing and resampling
-            val pcmShortAccumulator = ArrayList<Short>(4096)
+            // Initialize streaming band-limited resampler
+            val resampler = StreamingResampler(srcSampleRate, TARGET_SAMPLE_RATE)
+
+            // Small 4KB byte buffer for writing output PCM to disk efficiently without per-sample I/O
+            val pcmOutBuffer = ByteArray(4096)
+            var pcmOutOffset = 0
+
+            val writeSample: (Short) -> Unit = { sample ->
+                val s = sample.toInt()
+                pcmOutBuffer[pcmOutOffset++] = (s and 0xFF).toByte()
+                pcmOutBuffer[pcmOutOffset++] = ((s shr 8) and 0xFF).toByte()
+                totalPcmBytesWritten += 2
+                if (pcmOutOffset >= pcmOutBuffer.size) {
+                    fos.write(pcmOutBuffer, 0, pcmOutOffset)
+                    pcmOutOffset = 0
+                }
+            }
 
             while (!isOutputEOS) {
                 if (!isInputEOS) {
@@ -132,20 +151,23 @@ object AudioDecoder {
                         shortBuffer.get(rawShorts)
 
                         // Downmix to mono if multi-channel
-                        if (srcChannels > 1) {
+                        val monoShorts = if (srcChannels > 1) {
                             val monoCount = shortCount / srcChannels
+                            val mono = ShortArray(monoCount)
                             for (i in 0 until monoCount) {
                                 var sum = 0
                                 for (ch in 0 until srcChannels) {
-                                    sum += rawShorts[i * srcChannels + ch]
+                                    sum += rawShorts[i * srcChannels + ch].toInt()
                                 }
-                                pcmShortAccumulator.add((sum / srcChannels).toShort())
+                                mono[i] = (sum / srcChannels).coerceIn(-32768, 32767).toShort()
                             }
+                            mono
                         } else {
-                            for (s in rawShorts) {
-                                pcmShortAccumulator.add(s)
-                            }
+                            rawShorts
                         }
+
+                        // Stream mono PCM through the band-limited resampler
+                        resampler.process(monoShorts, writeSample)
                     }
 
                     codec.releaseOutputBuffer(outputBufIndex, false)
@@ -153,31 +175,39 @@ object AudioDecoder {
                     if ((bufferInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0) {
                         isOutputEOS = true
                     }
+                } else if (outputBufIndex == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                    val newFormat = codec.outputFormat
+                    if (newFormat.containsKey(MediaFormat.KEY_SAMPLE_RATE)) {
+                        val updatedRate = newFormat.getInteger(MediaFormat.KEY_SAMPLE_RATE)
+                        if (updatedRate > 0 && updatedRate != srcSampleRate) {
+                            srcSampleRate = updatedRate
+                            resampler.updateSourceRate(updatedRate)
+                        }
+                    }
+                    if (newFormat.containsKey(MediaFormat.KEY_CHANNEL_COUNT)) {
+                        val updatedChannels = newFormat.getInteger(MediaFormat.KEY_CHANNEL_COUNT)
+                        if (updatedChannels > 0) {
+                            srcChannels = updatedChannels
+                        }
+                    }
+                    Log.i(TAG, "MediaCodec confirmed output format: rate=$srcSampleRate, channels=$srcChannels")
                 }
             }
 
-            // Resample accumulated mono samples to 16kHz
-            val resampledShorts = resampleLinear(
-                pcmShortAccumulator.toShortArray(),
-                srcSampleRate,
-                TARGET_SAMPLE_RATE
-            )
+            // Flush resampler tail
+            resampler.finish(writeSample)
 
-            // Write 16-bit little-endian samples to WAV
-            val byteBuffer = ByteBuffer.allocate(resampledShorts.size * 2).order(ByteOrder.LITTLE_ENDIAN)
-            for (sample in resampledShorts) {
-                byteBuffer.putShort(sample)
+            // Flush remaining buffered PCM bytes to disk
+            if (pcmOutOffset > 0) {
+                fos.write(pcmOutBuffer, 0, pcmOutOffset)
+                pcmOutOffset = 0
             }
-            val resampledBytes = byteBuffer.array()
-            fos.write(resampledBytes)
-            totalPcmBytesWritten += resampledBytes.size
-
             fos.flush()
             try {
                 fos.close()
             } catch (_: Exception) {}
 
-            // Update WAV header with actual data size
+            // Update WAV header with exact data size
             updateWavHeader(outputFile, totalPcmBytesWritten, TARGET_SAMPLE_RATE, 1)
 
             Result.success(outputFile)
@@ -201,44 +231,169 @@ object AudioDecoder {
     }
 
     /**
-     * Resamples a 16-bit mono PCM array using linear interpolation.
+     * One-shot band-limited resampling utility for audio arrays.
+     * Useful for in-memory processing and testing.
      */
-    private fun resampleLinear(
-        input: ShortArray,
-        srcRate: Int,
-        dstRate: Int
-    ): ShortArray {
-        if (input.isEmpty() || srcRate == dstRate) {
-            return input
-        }
-
-        val ratio = srcRate.toDouble() / dstRate.toDouble()
-        val outLength = (input.size / ratio).toInt().coerceAtLeast(1)
-        val output = ShortArray(outLength)
-
-        for (i in 0 until outLength) {
-            val srcIndexDouble = i * ratio
-            val srcIndex = srcIndexDouble.toInt()
-            val fraction = srcIndexDouble - srcIndex
-
-            if (srcIndex + 1 < input.size) {
-                val s0 = input[srcIndex].toInt()
-                val s1 = input[srcIndex + 1].toInt()
-                val interpolated = s0 + (fraction * (s1 - s0)).toInt()
-                output[i] = interpolated.coerceIn(-32768, 32767).toShort()
-            } else if (srcIndex < input.size) {
-                output[i] = input[srcIndex]
-            } else {
-                output[i] = 0
-            }
-        }
-        return output
+    fun resampleBandLimited(input: ShortArray, srcRate: Int, dstRate: Int = TARGET_SAMPLE_RATE): ShortArray {
+        if (input.isEmpty() || srcRate == dstRate) return input
+        val resampler = StreamingResampler(srcRate, dstRate)
+        val approxOutCount = (input.size.toDouble() * dstRate / srcRate).roundToInt() + 64
+        val outList = ArrayList<Short>(approxOutCount)
+        resampler.process(input) { outList.add(it) }
+        resampler.finish { outList.add(it) }
+        return outList.toShortArray()
     }
 
     /**
-     * Writes standard 44-byte RIFF WAV header.
+     * High-quality band-limited audio resampler using windowed-sinc interpolation with a Blackman window.
+     * Prevents high-frequency aliasing folding into the speech band when downsampling to 16 kHz.
      */
-    private fun writeWavHeader(
+    class StreamingResampler(
+        private var srcRate: Int,
+        private val dstRate: Int = TARGET_SAMPLE_RATE,
+        private val filterHalfWidth: Int = 16
+    ) {
+        // Overlap buffer retaining incoming audio samples for the filter convolution
+        private var buffer = ShortArray(0)
+        private var inputPos = 0.0
+        private var isFirstChunk = true
+
+        fun updateSourceRate(newRate: Int) {
+            if (newRate > 0 && newRate != srcRate) {
+                srcRate = newRate
+            }
+        }
+
+        fun process(inputSamples: ShortArray, output: (Short) -> Unit) {
+            if (inputSamples.isEmpty()) return
+
+            if (srcRate == dstRate) {
+                for (s in inputSamples) {
+                    output(s)
+                }
+                return
+            }
+
+            // Append inputSamples to buffer
+            val initialPad = if (isFirstChunk) {
+                isFirstChunk = false
+                filterHalfWidth
+            } else 0
+
+            val oldSize = buffer.size
+            val newTotal = oldSize + initialPad + inputSamples.size
+            val newBuffer = ShortArray(newTotal)
+            if (oldSize > 0) {
+                System.arraycopy(buffer, 0, newBuffer, 0, oldSize)
+            }
+            // initialPad zeros are already 0
+            System.arraycopy(inputSamples, 0, newBuffer, oldSize + initialPad, inputSamples.size)
+            buffer = newBuffer
+
+            if (initialPad > 0) {
+                inputPos = filterHalfWidth.toDouble()
+            }
+
+            val ratio = srcRate.toDouble() / dstRate.toDouble()
+            val cutoffScale = 0.9 * minOf(1.0, dstRate.toDouble() / srcRate.toDouble())
+
+            while (inputPos + filterHalfWidth < buffer.size) {
+                val center = inputPos.roundToInt()
+                var sumVal = 0.0
+                var sumWeights = 0.0
+
+                val startK = maxOf(0, center - filterHalfWidth)
+                val endK = minOf(buffer.size - 1, center + filterHalfWidth)
+
+                for (k in startK..endK) {
+                    val delta = inputPos - k
+                    val absDelta = abs(delta)
+                    if (absDelta <= filterHalfWidth) {
+                        val sinc = if (absDelta < 1e-9) {
+                            1.0
+                        } else {
+                            val x = Math.PI * cutoffScale * delta
+                            sin(x) / x
+                        }
+                        // Blackman window
+                        val w = 0.42 + 0.5 * cos(Math.PI * delta / filterHalfWidth) + 0.08 * cos(2.0 * Math.PI * delta / filterHalfWidth)
+                        val weight = sinc * w
+                        sumVal += buffer[k].toInt() * weight
+                        sumWeights += weight
+                    }
+                }
+
+                val outVal = if (sumWeights != 0.0) sumVal / sumWeights else 0.0
+                output(outVal.roundToInt().coerceIn(-32768, 32767).toShort())
+
+                inputPos += ratio
+            }
+
+            // Drop consumed samples, keep overlap for the next chunk
+            val minNeeded = (inputPos.roundToInt() - filterHalfWidth).coerceAtLeast(0)
+            if (minNeeded > 0) {
+                val remaining = buffer.size - minNeeded
+                val trimmed = ShortArray(remaining)
+                System.arraycopy(buffer, minNeeded, trimmed, 0, remaining)
+                buffer = trimmed
+                inputPos -= minNeeded
+            }
+        }
+
+        fun finish(output: (Short) -> Unit) {
+            if (srcRate == dstRate || buffer.isEmpty()) {
+                buffer = ShortArray(0)
+                return
+            }
+
+            // Pad filterHalfWidth zeros at the end to flush remaining output samples
+            val oldSize = buffer.size
+            val padded = ShortArray(oldSize + filterHalfWidth)
+            System.arraycopy(buffer, 0, padded, 0, oldSize)
+            buffer = padded
+
+            val ratio = srcRate.toDouble() / dstRate.toDouble()
+            val cutoffScale = 0.9 * minOf(1.0, dstRate.toDouble() / srcRate.toDouble())
+
+            while (inputPos + filterHalfWidth < buffer.size) {
+                val center = inputPos.roundToInt()
+                var sumVal = 0.0
+                var sumWeights = 0.0
+
+                val startK = maxOf(0, center - filterHalfWidth)
+                val endK = minOf(buffer.size - 1, center + filterHalfWidth)
+
+                for (k in startK..endK) {
+                    val delta = inputPos - k
+                    val absDelta = abs(delta)
+                    if (absDelta <= filterHalfWidth) {
+                        val sinc = if (absDelta < 1e-9) {
+                            1.0
+                        } else {
+                            val x = Math.PI * cutoffScale * delta
+                            sin(x) / x
+                        }
+                        val w = 0.42 + 0.5 * cos(Math.PI * delta / filterHalfWidth) + 0.08 * cos(2.0 * Math.PI * delta / filterHalfWidth)
+                        val weight = sinc * w
+                        sumVal += buffer[k].toInt() * weight
+                        sumWeights += weight
+                    }
+                }
+
+                val outVal = if (sumWeights != 0.0) sumVal / sumWeights else 0.0
+                output(outVal.roundToInt().coerceIn(-32768, 32767).toShort())
+
+                inputPos += ratio
+            }
+
+            buffer = ShortArray(0)
+        }
+    }
+
+    /**
+     * Writes standard 44-byte RIFF WAV header for 16-bit linear PCM audio.
+     */
+    internal fun writeWavHeader(
         out: FileOutputStream,
         sampleRate: Int,
         channels: Int,
@@ -299,14 +454,13 @@ object AudioDecoder {
     /**
      * Updates the data size fields in the WAV header via RandomAccessFile.
      */
-    private fun updateWavHeader(
+    internal fun updateWavHeader(
         file: File,
         pcmDataLength: Int,
         sampleRate: Int,
         channels: Int
     ) {
         val totalDataLen = pcmDataLength + 36
-        val byteRate = sampleRate * channels * 2
         val raf = RandomAccessFile(file, "rw")
         try {
             raf.seek(4)

@@ -49,6 +49,7 @@ class AndroidAudioRecorder(
                 setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
                 setAudioEncodingBitRate(128000)
                 setAudioSamplingRate(44100)
+                setAudioChannels(1)
                 setOutputFile(outputFile.absolutePath)
                 setOnErrorListener { _, what, extra ->
                     Log.e(TAG, "MediaRecorder error: what=$what, extra=$extra")
