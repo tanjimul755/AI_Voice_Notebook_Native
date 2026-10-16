@@ -23,6 +23,7 @@ interface VoiceNoteRepository {
     ): VoiceNote
     suspend fun updateNoteTitle(id: Long, newTitle: String)
     suspend fun updateTranscription(id: Long, transcription: String)
+    suspend fun updateReminder(id: Long, reminderTimestamp: Long?)
     suspend fun toggleStarred(id: Long)
     suspend fun deleteNote(note: VoiceNote): Boolean
 }
@@ -78,6 +79,10 @@ class VoiceNoteRepositoryImpl(
 
     override suspend fun updateTranscription(id: Long, transcription: String) {
         dao.updateTranscription(id, transcription.trim())
+    }
+
+    override suspend fun updateReminder(id: Long, reminderTimestamp: Long?) {
+        dao.updateReminder(id, reminderTimestamp)
     }
 
     override suspend fun toggleStarred(id: Long) {

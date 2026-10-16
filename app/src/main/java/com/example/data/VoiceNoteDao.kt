@@ -48,4 +48,7 @@ interface VoiceNoteDao {
 
     @Query("UPDATE voice_notes SET isStarred = NOT isStarred WHERE id = :id")
     suspend fun toggleStarred(id: Long)
+
+    @Query("UPDATE voice_notes SET reminderTimestamp = :reminderTimestamp WHERE id = :id")
+    suspend fun updateReminder(id: Long, reminderTimestamp: Long?)
 }

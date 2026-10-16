@@ -272,4 +272,114 @@ class ExampleRobolectricTest {
         assertTrue(tempFile.exists()) // Audio file is preserved
         assertEquals("Bangla Meeting Note", updatedNote?.title)
     }
+
+    @Test
+    fun notebookPreferences_persistsAndRetrievesAllSettings() {
+        val prefs = com.example.data.NotebookPreferences(context)
+
+        // Verify defaults
+        val initial = prefs.settings.value
+        assertTrue(initial.autoTitleGeneration)
+        assertTrue(initial.autoTranscription)
+        assertFalse(initial.autoGeminiFallback)
+        assertTrue(initial.cloudAiEnabled)
+        assertEquals(com.example.transcription.GeminiTranscriptionFormat.AUTO, initial.defaultTranscriptionFormat)
+        assertTrue(initial.autoReminderDetection)
+        assertFalse(initial.autoReminderScheduling)
+
+        // Update settings
+        prefs.setAutoTitleGeneration(false)
+        prefs.setAutoTranscription(true)
+        prefs.setAutoGeminiFallback(true)
+        prefs.setCloudAiEnabled(false)
+        prefs.setDefaultTranscriptionFormat(com.example.transcription.GeminiTranscriptionFormat.ROMANIZED_BANGLA)
+        prefs.setAutoReminderDetection(true)
+        prefs.setAutoReminderScheduling(true)
+
+        // Reload from new preferences instance (verifying persistent storage across app restarts)
+        val reloadedPrefs = com.example.data.NotebookPreferences(context)
+        val updated = reloadedPrefs.settings.value
+
+        assertFalse(updated.autoTitleGeneration)
+        assertTrue(updated.autoTranscription)
+        assertTrue(updated.autoGeminiFallback)
+        assertFalse(updated.cloudAiEnabled)
+        assertEquals(com.example.transcription.GeminiTranscriptionFormat.ROMANIZED_BANGLA, updated.defaultTranscriptionFormat)
+        assertTrue(updated.autoReminderDetection)
+        assertTrue(updated.autoReminderScheduling)
+    }
+
+    @Test
+    fun titleGenerator_generatesContextualTitlesFromTranscripts() {
+        // English sentence
+        val englishTranscript = "We discussed the budget report and finalized the Q3 marketing strategy."
+        val englishTitle = com.example.util.TitleGenerator.generateTitle(englishTranscript)
+        assertNotNull(englishTitle)
+        assertTrue(englishTitle?.contains("budget", ignoreCase = true) == true)
+
+        // Bangla sentence
+        val banglaTranscript = "আজকে মিটিং এ নতুন প্রজেক্টের পরিকল্পনা করা হলো।"
+        val banglaTitle = com.example.util.TitleGenerator.generateTitle(banglaTranscript)
+        assertNotNull(banglaTitle)
+        assertTrue(banglaTitle!!.isNotBlank())
+
+        // Blank or non-speech transcript returns null
+        val noSpeech = "[No speech detected in audio]"
+        assertEquals(null, com.example.util.TitleGenerator.generateTitle(noSpeech))
+        assertEquals(null, com.example.util.TitleGenerator.generateTitle(""))
+    }
+
+    @Test
+    fun reminderManager_detectsExplicitDateTimeWithoutInventingFakeTime() {
+        val reminderManager = com.example.reminder.ReminderManager(context)
+
+        // 1. Explicit future time in English
+        val englishWithTime = "Please remind me to submit the assignment tomorrow at 4 pm"
+        val detectedWithTime = reminderManager.detectReminder(englishWithTime)
+        assertNotNull(detectedWithTime)
+        assertTrue(detectedWithTime!!.isExplicitDateTime)
+        assertNotNull(detectedWithTime.targetTimestampMs)
+        assertTrue(detectedWithTime.targetTimestampMs!! > System.currentTimeMillis())
+
+        // 2. Reminder intent without explicit time: MUST NOT invent fake time!
+        val englishWithoutTime = "Don't forget to call Mom and wish her a happy birthday"
+        val detectedWithoutTime = reminderManager.detectReminder(englishWithoutTime)
+        assertNotNull(detectedWithoutTime)
+        assertFalse(detectedWithoutTime!!.isExplicitDateTime)
+        assertEquals(null, detectedWithoutTime.targetTimestampMs)
+
+        // 3. Explicit future time in Bangla
+        val banglaWithTime = "মনে করিয়ে দিও কালকে বিকাল ৫টায় ডাক্তারের সাথে দেখা করতে হবে"
+        val detectedBangla = reminderManager.detectReminder(banglaWithTime)
+        assertNotNull(detectedBangla)
+        assertTrue(detectedBangla!!.isExplicitDateTime)
+        assertNotNull(detectedBangla.targetTimestampMs)
+        assertTrue(detectedBangla.targetTimestampMs!! > System.currentTimeMillis())
+
+        // 4. Non-reminder text returns null
+        val regularSpeech = "The weather today is cloudy with light rain."
+        assertEquals(null, reminderManager.detectReminder(regularSpeech))
+    }
+
+    @Test
+    fun repository_updateReminderTimestamp() = runBlocking {
+        val tempFile = File(context.filesDir, "reminder_note.m4a")
+        tempFile.writeText("audio bytes")
+
+        val note = repository.saveNote(
+            title = "Doctor Appointment",
+            file = tempFile,
+            durationMs = 10000L
+        )
+
+        // Initially null
+        assertEquals(null, note.reminderTimestamp)
+
+        val targetTimestamp = System.currentTimeMillis() + 86400000L // +24 hours
+        repository.updateReminder(note.id, targetTimestamp)
+
+        val updated = repository.getNoteById(note.id)
+        assertNotNull(updated)
+        assertEquals(targetTimestamp, updated?.reminderTimestamp)
+    }
 }

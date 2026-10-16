@@ -50,11 +50,12 @@ fun GeminiTranscribeDialog(
     note: VoiceNote,
     isApiKeyConfigured: Boolean,
     isTranscribing: Boolean,
+    initialFormat: GeminiTranscriptionFormat = GeminiTranscriptionFormat.AUTO,
     onConfirm: (format: GeminiTranscriptionFormat) -> Unit,
     onDismiss: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    var selectedFormat by remember { mutableStateOf(GeminiTranscriptionFormat.AUTO) }
+    var selectedFormat by remember(initialFormat) { mutableStateOf(initialFormat) }
 
     AlertDialog(
         onDismissRequest = {

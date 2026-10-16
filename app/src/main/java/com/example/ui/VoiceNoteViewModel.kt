@@ -9,14 +9,18 @@ import com.example.audio.AudioFileManager
 import com.example.audio.AudioPlayer
 import com.example.audio.AudioRecorder
 import com.example.data.AppDatabase
+import com.example.data.NotebookPreferences
+import com.example.data.NotebookSettings
 import com.example.data.VoiceNoteRepository
 import com.example.data.VoiceNoteRepositoryImpl
 import com.example.model.VoiceNote
+import com.example.reminder.ReminderManager
 import com.example.transcription.AudioTranscriber
 import com.example.transcription.GeminiAudioTranscriber
 import com.example.transcription.GeminiTranscriptionFormat
 import com.example.transcription.WhisperAudioTranscriber
 import com.example.transcription.WhisperModelStatus
+import com.example.util.TitleGenerator
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -68,7 +72,10 @@ data class NotebookUiState(
     val modelDownloadProgress: Float? = null,
     val aiTranscribingNoteId: Long? = null,
     val activeAiTranscribeDialogNote: VoiceNote? = null,
-    val isGeminiApiKeyConfigured: Boolean = false
+    val isGeminiApiKeyConfigured: Boolean = false,
+    val isSettingsDialogVisible: Boolean = false,
+    val newlyCreatedNoteId: Long? = null,
+    val settings: NotebookSettings = NotebookSettings()
 )
 
 private data class DialogsAndMessages(
@@ -86,7 +93,10 @@ private data class DialogsAndMessages(
     val isDownloadingModel: Boolean = false,
     val modelDownloadProgress: Float? = null,
     val aiTranscribingNoteId: Long? = null,
-    val activeAiTranscribeDialogNote: VoiceNote? = null
+    val activeAiTranscribeDialogNote: VoiceNote? = null,
+    val isSettingsDialogVisible: Boolean = false,
+    val newlyCreatedNoteId: Long? = null,
+    val settings: NotebookSettings = NotebookSettings()
 )
 
 class VoiceNoteViewModel(
@@ -96,13 +106,15 @@ class VoiceNoteViewModel(
     private val audioPlayer: AudioPlayer,
     private val audioFileManager: AudioFileManager,
     private val audioTranscriber: AudioTranscriber = WhisperAudioTranscriber(application),
-    private val geminiTranscriber: GeminiAudioTranscriber = GeminiAudioTranscriber(application)
+    private val geminiTranscriber: GeminiAudioTranscriber = GeminiAudioTranscriber(application),
+    private val notebookPreferences: NotebookPreferences = NotebookPreferences(application),
+    private val reminderManager: ReminderManager = ReminderManager(application)
 ) : AndroidViewModel(application) {
 
     private val _searchQuery = MutableStateFlow("")
     private val _recordingStatus = MutableStateFlow<RecordingStatus>(RecordingStatus.Idle)
     private val _playbackState = MutableStateFlow(PlaybackState())
-    private val _dialogsAndMessages = MutableStateFlow(DialogsAndMessages())
+    private val _dialogsAndMessages = MutableStateFlow(DialogsAndMessages(settings = notebookPreferences.settings.value))
 
     private var recordingTimerJob: Job? = null
     private var recordingElapsedMs: Long = 0L
@@ -112,6 +124,14 @@ class VoiceNoteViewModel(
 
     private val transcriptionMutex = Mutex()
     private var preferredLanguage: String = "auto"
+
+    init {
+        viewModelScope.launch {
+            notebookPreferences.settings.collect { newSettings ->
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(settings = newSettings)
+            }
+        }
+    }
 
     // Combined reactive UI State flow (exactly 5 flows for standard type-safe combine)
     val uiState: StateFlow<NotebookUiState> = combine(
@@ -126,7 +146,8 @@ class VoiceNoteViewModel(
         } else {
             allNotes.filter {
                 it.title.contains(query, ignoreCase = true) ||
-                it.tags.contains(query, ignoreCase = true)
+                it.tags.contains(query, ignoreCase = true) ||
+                (it.transcription?.contains(query, ignoreCase = true) == true)
             }
         }
 
@@ -151,7 +172,10 @@ class VoiceNoteViewModel(
             modelDownloadProgress = dm.modelDownloadProgress,
             aiTranscribingNoteId = dm.aiTranscribingNoteId,
             activeAiTranscribeDialogNote = dm.activeAiTranscribeDialogNote,
-            isGeminiApiKeyConfigured = geminiTranscriber.isApiKeyConfigured()
+            isGeminiApiKeyConfigured = geminiTranscriber.isApiKeyConfigured(),
+            isSettingsDialogVisible = dm.isSettingsDialogVisible,
+            newlyCreatedNoteId = dm.newlyCreatedNoteId,
+            settings = dm.settings
         )
     }.stateIn(
         scope = viewModelScope,
@@ -162,7 +186,6 @@ class VoiceNoteViewModel(
     // --- Audio Recording Logic ---
 
     fun startRecording() {
-        // Stop any active playback prior to recording
         stopPlayback()
 
         val newFile = audioFileManager.createOutputFile()
@@ -207,6 +230,11 @@ class VoiceNoteViewModel(
         }
     }
 
+    /**
+     * Stops audio recording and immediately saves the audio to persistent storage.
+     * No modal title/tag dialog blocks the user. The audio is safely stored before any
+     * transcription or AI processing, ensuring failures never destroy a note.
+     */
     fun stopRecording() {
         recordingTimerJob?.cancel()
         if (_recordingStatus.value is RecordingStatus.Recording) {
@@ -220,15 +248,44 @@ class VoiceNoteViewModel(
         if (result.isSuccess) {
             val file = result.getOrThrow()
             _recordingStatus.value = RecordingStatus.Idle
+            recordingElapsedMs = 0L
+
             val defaultTitle = "Voice Note " + SimpleDateFormat("MMM d, HH:mm", Locale.getDefault()).format(Date())
-            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                isSaveDialogVisible = true,
-                pendingSavedFile = file,
-                pendingDurationMs = totalDuration,
-                proposedTitle = defaultTitle
-            )
+
+            viewModelScope.launch {
+                try {
+                    // 1. Immediately persist the recording to Room
+                    val savedNote = repository.saveNote(
+                        title = defaultTitle,
+                        file = file,
+                        durationMs = totalDuration,
+                        tags = ""
+                    )
+
+                    // 2. Update UI: trigger auto-scroll to the newest note and show confirmation
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        isSaveDialogVisible = false,
+                        pendingSavedFile = null,
+                        pendingDurationMs = 0L,
+                        proposedTitle = "",
+                        newlyCreatedNoteId = savedNote.id,
+                        infoMessage = "Voice note saved."
+                    )
+
+                    // 3. Initiate automatic transcription workflow if enabled in settings
+                    val currentSettings = _dialogsAndMessages.value.settings
+                    if (currentSettings.autoTranscription) {
+                        processAutomaticTranscription(savedNote)
+                    }
+                } catch (e: Exception) {
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        errorMessage = "Failed to save voice note: ${e.message}"
+                    )
+                }
+            }
         } else {
             _recordingStatus.value = RecordingStatus.Idle
+            recordingElapsedMs = 0L
             _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                 errorMessage = "Recording ended: ${result.exceptionOrNull()?.message ?: "File was empty"}"
             )
@@ -255,7 +312,7 @@ class VoiceNoteViewModel(
         }
     }
 
-    // --- Save / Discard Dialog Actions ---
+    // --- Save / Discard Dialog Actions (Maintained for backward compatibility) ---
 
     fun confirmSaveRecording(title: String, tags: String) {
         val file = _dialogsAndMessages.value.pendingSavedFile
@@ -271,26 +328,17 @@ class VoiceNoteViewModel(
                         tags = tags
                     )
 
-                    val modelStatus = audioTranscriber.getModelStatus()
-                    if (modelStatus.isAvailable) {
-                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                            isSaveDialogVisible = false,
-                            pendingSavedFile = null,
-                            pendingDurationMs = 0L,
-                            proposedTitle = "",
-                            infoMessage = "Voice note saved. Transcribing automatically..."
-                        )
-                        startTranscribe(savedNote, preferredLanguage)
-                    } else {
-                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                            isSaveDialogVisible = false,
-                            pendingSavedFile = null,
-                            pendingDurationMs = 0L,
-                            proposedTitle = "",
-                            activeTranscribeDialogNote = savedNote,
-                            modelStatus = modelStatus,
-                            infoMessage = "Voice note saved. Offline Whisper model required for transcription."
-                        )
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        isSaveDialogVisible = false,
+                        pendingSavedFile = null,
+                        pendingDurationMs = 0L,
+                        proposedTitle = "",
+                        newlyCreatedNoteId = savedNote.id,
+                        infoMessage = "Voice note saved."
+                    )
+
+                    if (_dialogsAndMessages.value.settings.autoTranscription) {
+                        processAutomaticTranscription(savedNote)
                     }
                 } catch (e: Exception) {
                     _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
@@ -346,7 +394,6 @@ class VoiceNoteViewModel(
                 startPlaybackPolling(note.id)
             }
         } else {
-            // New note playback
             audioPlayer.stop()
             playbackPollingJob?.cancel()
 
@@ -474,7 +521,235 @@ class VoiceNoteViewModel(
         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(infoMessage = null)
     }
 
-    // --- Offline Speech-to-Text Transcription Actions ---
+    fun clearNewlyCreatedNoteId() {
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(newlyCreatedNoteId = null)
+    }
+
+    // --- Settings Dialog & Persistence Actions ---
+
+    fun showSettingsDialog() {
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(isSettingsDialogVisible = true)
+    }
+
+    fun dismissSettingsDialog() {
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(isSettingsDialogVisible = false)
+    }
+
+    fun setAutoTitleGeneration(enabled: Boolean) {
+        notebookPreferences.setAutoTitleGeneration(enabled)
+    }
+
+    fun setAutoTranscription(enabled: Boolean) {
+        notebookPreferences.setAutoTranscription(enabled)
+    }
+
+    fun setAutoGeminiFallback(enabled: Boolean) {
+        notebookPreferences.setAutoGeminiFallback(enabled)
+    }
+
+    fun setCloudAiEnabled(enabled: Boolean) {
+        notebookPreferences.setCloudAiEnabled(enabled)
+    }
+
+    fun setDefaultTranscriptionFormat(format: GeminiTranscriptionFormat) {
+        notebookPreferences.setDefaultTranscriptionFormat(format)
+    }
+
+    fun setAutoReminderDetection(enabled: Boolean) {
+        notebookPreferences.setAutoReminderDetection(enabled)
+    }
+
+    fun setAutoReminderScheduling(enabled: Boolean) {
+        notebookPreferences.setAutoReminderScheduling(enabled)
+    }
+
+    // --- Automatic Transcription Orchestration ---
+
+    /**
+     * Intelligently orchestrates automatic transcription following recording save.
+     * Uses local Whisper first where available; optionally falls back to Gemini AI when
+     * local transcription fails, returns empty/hallucinatory text, or when the user requires
+     * specialized Romanized Bangla or English translation formats.
+     */
+    private fun processAutomaticTranscription(note: VoiceNote) {
+        val currentSettings = _dialogsAndMessages.value.settings
+        val format = currentSettings.defaultTranscriptionFormat
+        val allowCloud = currentSettings.cloudAiEnabled && geminiTranscriber.isApiKeyConfigured()
+        val allowFallback = currentSettings.autoGeminiFallback && allowCloud
+
+        val audioFile = File(note.filePath)
+        if (!audioFile.exists() || audioFile.length() == 0L) return
+
+        val whisperStatus = audioTranscriber.getModelStatus()
+
+        if (whisperStatus.isAvailable) {
+            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                transcribingNoteId = note.id,
+                infoMessage = "Voice note saved. Transcribing locally..."
+            )
+
+            viewModelScope.launch {
+                transcriptionMutex.withLock {
+                    try {
+                        val whisperResult = audioTranscriber.transcribe(audioFile, preferredLanguage)
+                        val whisperText = whisperResult.getOrNull()?.trim()
+
+                        val isFailedOrEmpty = whisperResult.isFailure ||
+                                whisperText.isNullOrBlank() ||
+                                whisperText == "[No speech detected in audio]"
+                        val isHallucination = !whisperText.isNullOrBlank() && isRepetitiveLoop(whisperText)
+                        val isSpecializedFormat = (format == GeminiTranscriptionFormat.ROMANIZED_BANGLA ||
+                                format == GeminiTranscriptionFormat.ENGLISH)
+
+                        val shouldUseFallback = allowFallback && (isFailedOrEmpty || isHallucination || isSpecializedFormat)
+
+                        if (shouldUseFallback) {
+                            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                transcribingNoteId = null,
+                                aiTranscribingNoteId = note.id,
+                                infoMessage = "Falling back to Gemini AI (${format.displayName})..."
+                            )
+                            val geminiResult = geminiTranscriber.transcribeAudio(audioFile, format)
+                            if (geminiResult.isSuccess) {
+                                val transcript = geminiResult.getOrThrow()
+                                repository.updateTranscription(note.id, transcript)
+                                applyTitleAndReminders(note, transcript)
+                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                    aiTranscribingNoteId = null,
+                                    infoMessage = "Transcribed with Gemini AI (${format.displayName})"
+                                )
+                            } else {
+                                // Fallback failed (e.g. rate limit, offline). If whisper had non-empty text, retain it.
+                                if (!whisperText.isNullOrBlank() && whisperText != "[No speech detected in audio]") {
+                                    repository.updateTranscription(note.id, whisperText)
+                                    applyTitleAndReminders(note, whisperText)
+                                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                        aiTranscribingNoteId = null,
+                                        infoMessage = "Local transcript saved (AI fallback unavailable: ${geminiResult.exceptionOrNull()?.message})"
+                                    )
+                                } else {
+                                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                        aiTranscribingNoteId = null,
+                                        errorMessage = "Transcription failed: ${geminiResult.exceptionOrNull()?.message}"
+                                    )
+                                }
+                            }
+                        } else {
+                            if (whisperResult.isSuccess && !whisperText.isNullOrBlank()) {
+                                repository.updateTranscription(note.id, whisperText)
+                                applyTitleAndReminders(note, whisperText)
+                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                    transcribingNoteId = null,
+                                    infoMessage = "Transcription saved to note"
+                                )
+                            } else {
+                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                    transcribingNoteId = null,
+                                    errorMessage = "Transcription failed: ${whisperResult.exceptionOrNull()?.message ?: "No speech recognized"}"
+                                )
+                            }
+                        }
+                    } catch (e: Exception) {
+                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                            transcribingNoteId = null,
+                            aiTranscribingNoteId = null,
+                            errorMessage = "Transcription error: ${e.message}"
+                        )
+                    }
+                }
+            }
+        } else {
+            // Whisper model is not downloaded
+            if (allowFallback) {
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    aiTranscribingNoteId = note.id,
+                    infoMessage = "Whisper offline model missing. Transcribing with Gemini AI..."
+                )
+                viewModelScope.launch {
+                    transcriptionMutex.withLock {
+                        try {
+                            val geminiResult = geminiTranscriber.transcribeAudio(audioFile, format)
+                            if (geminiResult.isSuccess) {
+                                val transcript = geminiResult.getOrThrow()
+                                repository.updateTranscription(note.id, transcript)
+                                applyTitleAndReminders(note, transcript)
+                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                    aiTranscribingNoteId = null,
+                                    infoMessage = "AI transcription completed (${format.displayName})"
+                                )
+                            } else {
+                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                    aiTranscribingNoteId = null,
+                                    errorMessage = "AI transcription failed: ${geminiResult.exceptionOrNull()?.message}"
+                                )
+                            }
+                        } catch (e: Exception) {
+                            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                aiTranscribingNoteId = null,
+                                errorMessage = "AI transcription error: ${e.message}"
+                            )
+                        }
+                    }
+                }
+            } else {
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    activeTranscribeDialogNote = note,
+                    modelStatus = whisperStatus,
+                    infoMessage = "Voice note saved. Offline Whisper model required for transcription."
+                )
+            }
+        }
+    }
+
+    private suspend fun applyTitleAndReminders(note: VoiceNote, transcript: String) {
+        val currentSettings = _dialogsAndMessages.value.settings
+
+        // 1. Contextual Title Generation
+        if (currentSettings.autoTitleGeneration) {
+            val generatedTitle = TitleGenerator.generateTitle(transcript)
+            if (!generatedTitle.isNullOrBlank()) {
+                repository.updateNoteTitle(note.id, generatedTitle)
+            }
+        }
+
+        // 2. Reminder Detection & Scheduling
+        if (currentSettings.autoReminderDetection) {
+            val reminder = reminderManager.detectReminder(transcript)
+            if (reminder != null) {
+                if (currentSettings.autoReminderScheduling && reminder.targetTimestampMs != null) {
+                    val updatedNote = note.copy(transcription = transcript)
+                    val scheduled = reminderManager.scheduleAlarm(updatedNote, reminder.targetTimestampMs)
+                    if (scheduled) {
+                        repository.updateReminder(note.id, reminder.targetTimestampMs)
+                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                            infoMessage = "Reminder scheduled for ${AudioFileManager.formatTimestamp(reminder.targetTimestampMs)}"
+                        )
+                    }
+                } else {
+                    if (reminder.targetTimestampMs != null) {
+                        repository.updateReminder(note.id, reminder.targetTimestampMs)
+                    }
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        infoMessage = "Reminder detected: ${reminder.taskSummary}"
+                    )
+                }
+            }
+        }
+    }
+
+    private fun isRepetitiveLoop(text: String): Boolean {
+        if (text.length < 30) return false
+        val words = text.split("\\s+".toRegex())
+        if (words.size < 8) return false
+        for (i in 0 until words.size - 5) {
+            val phrase = "${words[i]} ${words[i+1]} ${words[i+2]}"
+            val count = text.windowed(phrase.length, 1).count { it == phrase }
+            if (count >= 3) return true
+        }
+        return false
+    }
+
+    // --- Offline Speech-to-Text Transcription Actions (Manual) ---
 
     fun promptTranscribe(note: VoiceNote) {
         val status = audioTranscriber.getModelStatus()
@@ -511,7 +786,6 @@ class VoiceNoteViewModel(
                     modelStatus = updatedStatus,
                     infoMessage = "Whisper model downloaded successfully. Ready for offline transcription."
                 )
-                // If a note was waiting for the model to download, start transcription automatically
                 if (waitingNote != null && updatedStatus.isAvailable) {
                     startTranscribe(waitingNote, preferredLanguage)
                 }
@@ -528,8 +802,9 @@ class VoiceNoteViewModel(
     fun startTranscribe(note: VoiceNote, language: String = preferredLanguage) {
         preferredLanguage = language
 
-        // Prevent duplicate transcription job on the same note
-        if (_dialogsAndMessages.value.transcribingNoteId == note.id) {
+        if (_dialogsAndMessages.value.transcribingNoteId == note.id ||
+            _dialogsAndMessages.value.aiTranscribingNoteId == note.id
+        ) {
             return
         }
 
@@ -552,7 +827,6 @@ class VoiceNoteViewModel(
             return
         }
 
-        // Close dialog and show active transcription on note
         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
             activeTranscribeDialogNote = null,
             transcribingNoteId = note.id,
@@ -566,6 +840,7 @@ class VoiceNoteViewModel(
                     if (result.isSuccess) {
                         val transcript = result.getOrThrow()
                         repository.updateTranscription(note.id, transcript)
+                        applyTitleAndReminders(note, transcript)
                         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                             transcribingNoteId = null,
                             infoMessage = "Transcription saved to note"
@@ -586,7 +861,7 @@ class VoiceNoteViewModel(
         }
     }
 
-    // --- Google Gemini AI Audio Transcription Actions ---
+    // --- Google Gemini AI Audio Transcription Actions (Manual) ---
 
     fun promptAiTranscribe(note: VoiceNote) {
         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
@@ -602,9 +877,8 @@ class VoiceNoteViewModel(
 
     fun startAiTranscribe(
         note: VoiceNote,
-        format: GeminiTranscriptionFormat = GeminiTranscriptionFormat.AUTO
+        format: GeminiTranscriptionFormat = _dialogsAndMessages.value.settings.defaultTranscriptionFormat
     ) {
-        // Prevent duplicate concurrent transcription on the same note
         if (_dialogsAndMessages.value.aiTranscribingNoteId == note.id ||
             _dialogsAndMessages.value.transcribingNoteId == note.id
         ) {
@@ -628,7 +902,6 @@ class VoiceNoteViewModel(
             return
         }
 
-        // Close dialog and show active AI transcription indicator
         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
             activeAiTranscribeDialogNote = null,
             aiTranscribingNoteId = note.id,
@@ -642,6 +915,7 @@ class VoiceNoteViewModel(
                     if (result.isSuccess) {
                         val transcript = result.getOrThrow()
                         repository.updateTranscription(note.id, transcript)
+                        applyTitleAndReminders(note, transcript)
                         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                             aiTranscribingNoteId = null,
                             infoMessage = "AI transcription completed (${format.displayName})"
@@ -684,6 +958,8 @@ class VoiceNoteViewModel(
                     val player = AndroidAudioPlayer(application)
                     val transcriber = WhisperAudioTranscriber(application)
                     val geminiTranscriber = GeminiAudioTranscriber(application)
+                    val preferences = NotebookPreferences(application)
+                    val reminderMgr = ReminderManager(application)
                     return VoiceNoteViewModel(
                         application = application,
                         repository = repo,
@@ -691,7 +967,9 @@ class VoiceNoteViewModel(
                         audioPlayer = player,
                         audioFileManager = fileManager,
                         audioTranscriber = transcriber,
-                        geminiTranscriber = geminiTranscriber
+                        geminiTranscriber = geminiTranscriber,
+                        notebookPreferences = preferences,
+                        reminderManager = reminderMgr
                     ) as T
                 }
             }

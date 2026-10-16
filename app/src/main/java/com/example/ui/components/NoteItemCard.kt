@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -136,8 +137,18 @@ fun NoteItemCard(
 
                 Spacer(modifier = Modifier.width(8.dp))
 
+                val displayTitle = if (note.title.isBlank() || note.title.startsWith("Voice Note")) {
+                    if (!note.transcription.isNullOrBlank() && note.transcription != "[No speech detected in audio]") {
+                        note.transcription.lines().firstOrNull { it.isNotBlank() }?.take(45) ?: note.title
+                    } else {
+                        note.title.ifBlank { "Voice Note" }
+                    }
+                } else {
+                    note.title
+                }
+
                 Text(
-                    text = note.title,
+                    text = displayTitle,
                     style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -269,6 +280,32 @@ fun NoteItemCard(
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                             color = MaterialTheme.colorScheme.onSecondaryContainer
                         )
+                    }
+                }
+
+                if (note.reminderTimestamp != null) {
+                    Surface(
+                        shape = RoundedCornerShape(6.dp),
+                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f),
+                        modifier = Modifier.testTag("reminder_chip_${note.id}")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Alarm,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                modifier = Modifier.size(12.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Reminder: ${AudioFileManager.formatTimestamp(note.reminderTimestamp)}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                            )
+                        }
                     }
                 }
             }

@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -29,6 +30,7 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -69,6 +71,7 @@ import com.example.ui.components.NoteItemCard
 import com.example.ui.components.PermissionRationaleCard
 import com.example.ui.components.RecordingBottomBar
 import com.example.ui.components.SaveNoteDialog
+import com.example.ui.components.SettingsDialog
 import com.example.ui.components.TranscribeDialog
 
 /**
@@ -84,6 +87,7 @@ fun VoiceNotebookScreen(
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
+    val listState = rememberLazyListState()
 
     var isSearchExpanded by remember { mutableStateOf(false) }
     var hasPermissionDenied by remember { mutableStateOf(false) }
@@ -110,6 +114,14 @@ fun VoiceNotebookScreen(
             viewModel.startRecording()
         } else {
             permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
+    // Auto-scroll to newly created note without requiring manual scrolling
+    LaunchedEffect(uiState.newlyCreatedNoteId) {
+        uiState.newlyCreatedNoteId?.let {
+            listState.animateScrollToItem(0)
+            viewModel.clearNewlyCreatedNoteId()
         }
     }
 
@@ -178,6 +190,15 @@ fun VoiceNotebookScreen(
                         Icon(
                             imageVector = if (isSearchExpanded) Icons.Default.Close else Icons.Default.Search,
                             contentDescription = if (isSearchExpanded) "Close search" else "Search notes"
+                        )
+                    }
+                    IconButton(
+                        onClick = { viewModel.showSettingsDialog() },
+                        modifier = Modifier.testTag("settings_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Open Settings"
                         )
                     }
                 },
@@ -302,6 +323,7 @@ fun VoiceNotebookScreen(
             } else {
                 // Notes List
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxSize()
                         .testTag("notes_lazy_column"),
@@ -386,8 +408,25 @@ fun VoiceNotebookScreen(
             note = note,
             isApiKeyConfigured = uiState.isGeminiApiKeyConfigured,
             isTranscribing = uiState.aiTranscribingNoteId == note.id,
+            initialFormat = uiState.settings.defaultTranscriptionFormat,
             onConfirm = { format -> viewModel.startAiTranscribe(note, format) },
             onDismiss = { viewModel.dismissAiTranscribeDialog() }
+        )
+    }
+
+    // Settings Dialog
+    if (uiState.isSettingsDialogVisible) {
+        SettingsDialog(
+            settings = uiState.settings,
+            isGeminiConfigured = uiState.isGeminiApiKeyConfigured,
+            onAutoTitleChange = { viewModel.setAutoTitleGeneration(it) },
+            onAutoTranscribeChange = { viewModel.setAutoTranscription(it) },
+            onAutoFallbackChange = { viewModel.setAutoGeminiFallback(it) },
+            onCloudAiChange = { viewModel.setCloudAiEnabled(it) },
+            onFormatChange = { viewModel.setDefaultTranscriptionFormat(it) },
+            onReminderDetectionChange = { viewModel.setAutoReminderDetection(it) },
+            onReminderSchedulingChange = { viewModel.setAutoReminderScheduling(it) },
+            onDismiss = { viewModel.dismissSettingsDialog() }
         )
     }
 }
