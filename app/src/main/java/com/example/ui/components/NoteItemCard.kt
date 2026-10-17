@@ -2,6 +2,7 @@ package com.example.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -17,14 +18,14 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
-import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.NotificationsNone
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
@@ -49,8 +50,6 @@ import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.platform.LocalClipboardManager
-import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -58,12 +57,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.audio.AudioFileManager
 import com.example.model.VoiceNote
+import java.text.SimpleDateFormat
+import java.util.Calendar
+import java.util.Locale
 
 /**
  * Notebook item card representing a saved voice note.
@@ -121,7 +126,7 @@ fun NoteItemCard(
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
-            // Header: Title, Star, and Actions Menu
+            // Header: Title, Compact Reminder Indicator, and Actions Menu
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically
@@ -152,44 +157,109 @@ fun NoteItemCard(
                     note.title
                 }
 
-                Text(
-                    text = displayTitle,
-                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f)
-                )
-
-                val hasReminder = note.reminderTimestamp != null || !note.reminderTask.isNullOrBlank() || note.reminderStatus != "NONE"
-                if (hasReminder) {
-                    IconButton(
-                        onClick = onEditReminder,
-                        modifier = Modifier
-                            .size(36.dp)
-                            .testTag("reminder_bell_button_${note.id}")
-                    ) {
+                Row(
+                    modifier = Modifier.weight(1f),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = displayTitle,
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false)
+                    )
+                    if (note.isStarred) {
+                        Spacer(modifier = Modifier.width(6.dp))
                         Icon(
-                            imageVector = if (note.isReminderEnabled) Icons.Default.NotificationsActive else Icons.Default.NotificationsNone,
-                            contentDescription = if (note.isReminderEnabled) "Active reminder. Tap to edit." else "Disabled reminder. Tap to edit.",
-                            tint = if (note.isReminderEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
-                            modifier = Modifier.size(20.dp)
+                            imageVector = Icons.Default.Star,
+                            contentDescription = "Favorited",
+                            tint = MaterialTheme.colorScheme.tertiary,
+                            modifier = Modifier.size(16.dp)
                         )
                     }
                 }
 
-                IconButton(
-                    onClick = onToggleStar,
-                    modifier = Modifier
-                        .size(36.dp)
-                        .testTag("star_button_${note.id}")
-                ) {
-                    Icon(
-                        imageVector = if (note.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
-                        contentDescription = if (note.isStarred) "Unstar note" else "Star note",
-                        tint = if (note.isStarred) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                // Compact Clickable Reminder Indicator (e.g. 🔔 10:30 AM or 🔔 Set time)
+                val hasReminder = note.reminderTimestamp != null || !note.reminderTask.isNullOrBlank() || note.reminderStatus != "NONE"
+                if (hasReminder) {
+                    val reminderTimeText = when {
+                        note.reminderTimestamp != null -> {
+                            val cal = Calendar.getInstance().apply { timeInMillis = note.reminderTimestamp }
+                            val nowCal = Calendar.getInstance()
+                            if (cal.get(Calendar.YEAR) == nowCal.get(Calendar.YEAR) &&
+                                cal.get(Calendar.DAY_OF_YEAR) == nowCal.get(Calendar.DAY_OF_YEAR)
+                            ) {
+                                SimpleDateFormat("h:mm a", Locale.getDefault()).format(cal.time)
+                            } else {
+                                SimpleDateFormat("MMM d, h:mm a", Locale.getDefault()).format(cal.time)
+                            }
+                        }
+                        else -> "Set time"
+                    }
+
+                    val (pillIcon, pillText, pillBg, pillFg) = when {
+                        note.reminderStatus == "COMPLETED" -> {
+                            Quad(
+                                Icons.Default.CheckCircle,
+                                "$reminderTimeText (Done)",
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        !note.isReminderEnabled -> {
+                            Quad(
+                                Icons.Default.NotificationsNone,
+                                if (note.reminderTimestamp != null) "$reminderTimeText (Off)" else "Off",
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
+                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                            )
+                        }
+                        note.reminderTimestamp == null -> {
+                            Quad(
+                                Icons.Default.Notifications,
+                                "Set time",
+                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.85f),
+                                MaterialTheme.colorScheme.onSecondaryContainer
+                            )
+                        }
+                        else -> {
+                            Quad(
+                                Icons.Default.NotificationsActive,
+                                reminderTimeText,
+                                MaterialTheme.colorScheme.primaryContainer,
+                                MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        }
+                    }
+
+                    Surface(
+                        shape = RoundedCornerShape(8.dp),
+                        color = pillBg,
+                        modifier = Modifier
+                            .testTag("reminder_bell_button_${note.id}")
+                            .clickable { onEditReminder() }
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = pillIcon,
+                                contentDescription = "Reminder: $pillText. Tap to edit.",
+                                tint = pillFg,
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = pillText,
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                                color = pillFg
+                            )
+                        }
+                    }
                 }
 
+                // Three-dot actions menu
                 Box {
                     IconButton(
                         onClick = { showMenu = true },
@@ -207,6 +277,24 @@ fun NoteItemCard(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false }
                     ) {
+                        // Favorite / Unfavorite action
+                        DropdownMenuItem(
+                            text = { Text(if (note.isStarred) "Remove from Favorites" else "Add to Favorites") },
+                            leadingIcon = {
+                                Icon(
+                                    imageVector = if (note.isStarred) Icons.Default.Star else Icons.Default.StarBorder,
+                                    contentDescription = null,
+                                    tint = if (note.isStarred) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                onToggleStar()
+                            },
+                            modifier = Modifier.testTag("favorite_menu_item_${note.id}")
+                        )
+
                         DropdownMenuItem(
                             text = { Text(if (hasReminder) "Edit Reminder" else "Set Reminder") },
                             leadingIcon = {
@@ -229,7 +317,8 @@ fun NoteItemCard(
                                 Icon(
                                     Icons.Default.AutoAwesome,
                                     contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
                                 )
                             },
                             onClick = {
@@ -240,7 +329,7 @@ fun NoteItemCard(
                         )
                         DropdownMenuItem(
                             text = { Text(if (note.transcription.isNullOrBlank()) "Transcribe (Offline Whisper)" else "Re-transcribe (Offline)") },
-                            leadingIcon = { Icon(Icons.Default.Subtitles, contentDescription = null) },
+                            leadingIcon = { Icon(Icons.Default.Subtitles, contentDescription = null, modifier = Modifier.size(20.dp)) },
                             onClick = {
                                 showMenu = false
                                 onTranscribe()
@@ -249,7 +338,7 @@ fun NoteItemCard(
                         )
                         DropdownMenuItem(
                             text = { Text("Rename Note") },
-                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null) },
+                            leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(20.dp)) },
                             onClick = {
                                 showMenu = false
                                 onEditTitle()
@@ -262,7 +351,8 @@ fun NoteItemCard(
                                 Icon(
                                     Icons.Default.Delete,
                                     contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.error
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(20.dp)
                                 )
                             },
                             onClick = {
@@ -318,52 +408,6 @@ fun NoteItemCard(
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                             color = MaterialTheme.colorScheme.onSecondaryContainer
                         )
-                    }
-                }
-
-                if (note.reminderTimestamp != null || !note.reminderTask.isNullOrBlank()) {
-                    val reminderLabel = when {
-                        note.reminderTimestamp != null -> {
-                            val timeStr = AudioFileManager.formatTimestamp(note.reminderTimestamp)
-                            if (!note.reminderTask.isNullOrBlank()) "${note.reminderTask}: $timeStr" else "Reminder: $timeStr"
-                        }
-                        !note.reminderTask.isNullOrBlank() -> "${note.reminderTask} (Unscheduled)"
-                        else -> "Reminder"
-                    }
-                    val containerColor = if (note.isReminderEnabled) {
-                        MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f)
-                    } else {
-                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f)
-                    }
-                    val contentColor = if (note.isReminderEnabled) {
-                        MaterialTheme.colorScheme.onTertiaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.onSurfaceVariant
-                    }
-                    Surface(
-                        shape = RoundedCornerShape(6.dp),
-                        color = containerColor,
-                        modifier = Modifier
-                            .testTag("reminder_chip_${note.id}")
-                            .clickable { onEditReminder() }
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = if (note.isReminderEnabled) Icons.Default.Alarm else Icons.Default.NotificationsNone,
-                                contentDescription = null,
-                                tint = contentColor,
-                                modifier = Modifier.size(12.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = reminderLabel,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = contentColor
-                            )
-                        }
                     }
                 }
             }
@@ -450,14 +494,13 @@ fun NoteItemCard(
                     color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.45f),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .testTag("ai_transcribing_indicator_${note.id}")
+                        .testTag("transcribing_ai_indicator_${note.id}")
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(18.dp),
@@ -468,43 +511,45 @@ fun NoteItemCard(
                         Text(
                             text = "Transcribing with Gemini AI...",
                             style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                            color = MaterialTheme.colorScheme.onPrimaryContainer
+                            color = MaterialTheme.colorScheme.primary
                         )
                     }
                 }
             } else if (isTranscribing) {
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f),
-                    modifier = Modifier.fillMaxWidth()
+                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("transcribing_indicator_${note.id}")
                 ) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.Center
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         CircularProgressIndicator(
                             modifier = Modifier.size(18.dp),
                             strokeWidth = 2.dp,
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.secondary
                         )
                         Spacer(modifier = Modifier.width(10.dp))
                         Text(
-                            text = "Transcribing audio locally on device...",
+                            text = "Transcribing with Whisper (Offline)...",
                             style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium),
-                            color = MaterialTheme.colorScheme.primary
+                            color = MaterialTheme.colorScheme.secondary
                         )
                     }
                 }
             } else if (!note.transcription.isNullOrBlank()) {
+                val clipboardManager = LocalClipboardManager.current
+                var copiedState by remember { mutableStateOf(false) }
+
                 Surface(
                     shape = RoundedCornerShape(12.dp),
-                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f),
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("transcription_container_${note.id}")
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f),
+                    modifier = Modifier.fillMaxWidth()
                 ) {
                     Column(
                         modifier = Modifier
@@ -513,119 +558,52 @@ fun NoteItemCard(
                     ) {
                         Row(
                             modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "TRANSCRIPT",
+                                style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                            IconButton(
+                                onClick = {
+                                    clipboardManager.setText(AnnotatedString(note.transcription))
+                                    copiedState = true
+                                },
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .testTag("copy_transcript_button_${note.id}")
+                            ) {
                                 Icon(
-                                    imageVector = Icons.Default.Subtitles,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
+                                    imageVector = if (copiedState) Icons.Default.CheckCircle else Icons.Default.ContentCopy,
+                                    contentDescription = "Copy transcript",
+                                    tint = if (copiedState) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
                                     modifier = Modifier.size(16.dp)
                                 )
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "TRANSCRIPTION",
-                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                                    color = MaterialTheme.colorScheme.primary
-                                )
-                            }
-
-                            val clipboardManager = LocalClipboardManager.current
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                IconButton(
-                                    onClick = {
-                                        clipboardManager.setText(AnnotatedString(note.transcription))
-                                    },
-                                    modifier = Modifier
-                                        .size(28.dp)
-                                        .testTag("copy_transcription_${note.id}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.ContentCopy,
-                                        contentDescription = "Copy transcription",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                                IconButton(
-                                    onClick = onAiTranscribe,
-                                    modifier = Modifier
-                                        .size(28.dp)
-                                        .testTag("ai_retranscribe_button_${note.id}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.AutoAwesome,
-                                        contentDescription = "Transcribe with Gemini AI",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.primary
-                                    )
-                                }
-                                IconButton(
-                                    onClick = onTranscribe,
-                                    modifier = Modifier
-                                        .size(28.dp)
-                                        .testTag("retranscribe_button_${note.id}")
-                                ) {
-                                    Icon(
-                                        imageVector = Icons.Default.Refresh,
-                                        contentDescription = "Re-transcribe offline",
-                                        modifier = Modifier.size(16.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
                             }
                         }
-
-                        Spacer(modifier = Modifier.height(6.dp))
-
+                        Spacer(modifier = Modifier.height(4.dp))
                         Text(
                             text = note.transcription,
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.testTag("transcription_text_${note.id}")
+                            modifier = Modifier.testTag("note_transcript_${note.id}")
                         )
                     }
                 }
             } else {
+                // If not transcribed yet, offer quick action
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    FilledTonalButton(
-                        onClick = onAiTranscribe,
-                        modifier = Modifier
-                            .weight(1.1f)
-                            .height(38.dp)
-                            .testTag("ai_transcribe_button_${note.id}"),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer,
-                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer
-                        )
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AutoAwesome,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "AI Transcribe",
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
-                        )
-                    }
-
                     OutlinedButton(
                         onClick = onTranscribe,
+                        shape = RoundedCornerShape(10.dp),
                         modifier = Modifier
                             .weight(1f)
-                            .height(38.dp)
-                            .testTag("transcribe_note_button_${note.id}"),
-                        shape = RoundedCornerShape(10.dp),
-                        colors = ButtonDefaults.outlinedButtonColors(
-                            contentColor = MaterialTheme.colorScheme.primary
-                        )
+                            .testTag("transcribe_button_${note.id}")
                     ) {
                         Icon(
                             imageVector = Icons.Default.Subtitles,
@@ -634,8 +612,27 @@ fun NoteItemCard(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Offline Whisper",
-                            style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+                            text = "Transcribe (Offline)",
+                            style = MaterialTheme.typography.labelMedium
+                        )
+                    }
+
+                    FilledTonalButton(
+                        onClick = onAiTranscribe,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("ai_transcribe_button_${note.id}")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "Transcribe with AI",
+                            style = MaterialTheme.typography.labelMedium
                         )
                     }
                 }
@@ -643,3 +640,5 @@ fun NoteItemCard(
         }
     }
 }
+
+private data class Quad<A, B, C, D>(val first: A, val second: B, val third: C, val fourth: D)

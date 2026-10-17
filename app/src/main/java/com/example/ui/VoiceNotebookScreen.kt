@@ -416,18 +416,35 @@ fun VoiceNotebookScreen(
         )
     }
 
+    // Voice Note Reminder Editor Dialog
+    uiState.activeReminderDialogNote?.let { note ->
+        ReminderEditorDialog(
+            note = note,
+            onSave = { task, timestampMs, isEnabled ->
+                viewModel.saveReminderDetails(note, task, timestampMs, isEnabled)
+            },
+            onDeleteReminder = {
+                viewModel.deleteReminder(note)
+            },
+            onDismiss = {
+                viewModel.dismissReminderDialog()
+            }
+        )
+    }
+
     // Settings Dialog
     if (uiState.isSettingsDialogVisible) {
         SettingsDialog(
             settings = uiState.settings,
             isGeminiConfigured = uiState.isGeminiApiKeyConfigured,
+            isWhisperModelAvailable = uiState.modelStatus?.isAvailable == true,
+            onTranscriptionModeChange = { viewModel.setTranscriptionMode(it) },
             onAutoTitleChange = { viewModel.setAutoTitleGeneration(it) },
             onAutoTranscribeChange = { viewModel.setAutoTranscription(it) },
-            onAutoFallbackChange = { viewModel.setAutoGeminiFallback(it) },
-            onCloudAiChange = { viewModel.setCloudAiEnabled(it) },
             onFormatChange = { viewModel.setDefaultTranscriptionFormat(it) },
             onReminderDetectionChange = { viewModel.setAutoReminderDetection(it) },
             onReminderSchedulingChange = { viewModel.setAutoReminderScheduling(it) },
+            onDownloadWhisperModel = { viewModel.downloadWhisperModel() },
             onDismiss = { viewModel.dismissSettingsDialog() }
         )
     }

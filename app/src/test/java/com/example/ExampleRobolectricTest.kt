@@ -15,6 +15,7 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -285,7 +286,7 @@ class ExampleRobolectricTest {
         assertTrue(initial.cloudAiEnabled)
         assertEquals(com.example.transcription.GeminiTranscriptionFormat.AUTO, initial.defaultTranscriptionFormat)
         assertTrue(initial.autoReminderDetection)
-        assertFalse(initial.autoReminderScheduling)
+        assertTrue(initial.autoReminderScheduling)
 
         // Update settings
         prefs.setAutoTitleGeneration(false)
@@ -530,4 +531,177 @@ class ExampleRobolectricTest {
         val diff = kotlin.math.abs(outputList.size - expected)
         assertTrue("Output sample count ${outputList.size} should be close to expected $expected", diff <= 2)
     }
+
+    @Test
+    fun reminder_relativeDelay_10secondsExample() {
+        val reminderManager = com.example.reminder.ReminderManager(context)
+        val input = "Remind me that this app works after 10 seconds."
+        val detected = reminderManager.detectReminder(input)
+
+        assertNotNull(detected)
+        assertEquals("this app works", detected!!.taskSummary.lowercase(java.util.Locale.ROOT))
+        assertTrue(detected.isExplicitDateTime)
+        assertNotNull(detected.targetTimestampMs)
+
+        val diff = detected.targetTimestampMs!! - System.currentTimeMillis()
+        // Expected ~10 seconds (10,000 ms) delay
+        assertTrue("Expected ~10s delay, got ${diff}ms", diff in 8000L..12000L)
+    }
+
+    @Test
+    fun reminder_multilingualAndNegativeIntentCheck() {
+        val reminderManager = com.example.reminder.ReminderManager(context)
+
+        // 1. Positive English
+        val eng = reminderManager.detectReminder("Set a reminder to pay electricity bill at 6 PM")
+        assertNotNull(eng)
+        assertEquals(com.example.reminder.ReminderAction.CREATE, eng!!.action)
+        assertTrue(eng.isExplicitDateTime)
+
+        // 2. Positive Bangla
+        val bng = reminderManager.detectReminder("রিমাইন্ডার সেট কর কাল ৫টায় ডাক্তারের সাথে দেখা করতে হবে")
+        assertNotNull(bng)
+        assertEquals(com.example.reminder.ReminderAction.CREATE, bng!!.action)
+        assertTrue(bng.isExplicitDateTime)
+
+        // 3. Positive Banglish
+        val bnglish = reminderManager.detectReminder("Reminder set koro kal shokal 10tay bill dite hobe")
+        assertNotNull(bnglish)
+        assertEquals(com.example.reminder.ReminderAction.CREATE, bnglish!!.action)
+        assertTrue(bnglish.isExplicitDateTime)
+
+        // 4. Negative request (English): MUST NOT create reminder
+        val negEng = reminderManager.detectReminder("Don't set a reminder to call John")
+        assertNotNull(negEng)
+        assertEquals(com.example.reminder.ReminderAction.IGNORE, negEng!!.action)
+
+        val negEng2 = reminderManager.detectReminder("Don't remind me to buy milk.")
+        assertNotNull(negEng2)
+        assertEquals(com.example.reminder.ReminderAction.IGNORE, negEng2!!.action)
+
+        // 5. Negative request (Bangla): MUST NOT create reminder
+        val negBng = reminderManager.detectReminder("রিমাইন্ডার সেট করো না।")
+        assertNotNull(negBng)
+        assertEquals(com.example.reminder.ReminderAction.IGNORE, negBng!!.action)
+
+        val negBng2 = reminderManager.detectReminder("রিমাইন্ডার দিও না।")
+        assertNotNull(negBng2)
+        assertEquals(com.example.reminder.ReminderAction.IGNORE, negBng2!!.action)
+
+        // 6. Ordinary future statements: MUST return null
+        assertNull(reminderManager.detectReminder("I need to buy milk tomorrow."))
+        assertNull(reminderManager.detectReminder("Tomorrow is a public holiday."))
+        assertNull(reminderManager.detectReminder("We have a meeting at 5 PM."))
+    }
+
+    @Test
+    fun reminder_lifecycleEditDisableReenableAndRemove() = runBlocking {
+        val tempFile = File(context.filesDir, "reminder_lifecycle.m4a")
+        tempFile.writeText("sample audio data")
+
+        val note = repository.saveNote(
+            title = "Meeting with Alice",
+            file = tempFile,
+            durationMs = 5000L
+        )
+
+        val futureTime = System.currentTimeMillis() + 3600000L // 1 hour
+
+        // 1. Save reminder: active & scheduled
+        repository.updateReminderDetails(
+            id = note.id,
+            timestamp = futureTime,
+            task = "Review presentation",
+            isEnabled = true,
+            status = "SCHEDULED"
+        )
+        var current = repository.getNoteById(note.id)
+        assertNotNull(current)
+        assertEquals("SCHEDULED", current!!.reminderStatus)
+        assertTrue(current.isReminderEnabled)
+        assertEquals(futureTime, current.reminderTimestamp)
+        assertEquals("Review presentation", current.reminderTask)
+
+        // 2. Disable reminder: retains task, date & time, sets isEnabled=false and status=CANCELLED
+        repository.updateReminderDetails(
+            id = note.id,
+            timestamp = futureTime,
+            task = "Review presentation",
+            isEnabled = false,
+            status = "CANCELLED"
+        )
+        current = repository.getNoteById(note.id)
+        assertNotNull(current)
+        assertFalse(current!!.isReminderEnabled)
+        assertEquals("CANCELLED", current.reminderStatus)
+        assertEquals(futureTime, current.reminderTimestamp)
+        assertEquals("Review presentation", current.reminderTask)
+
+        // 3. Re-enable reminder
+        repository.updateReminderDetails(
+            id = note.id,
+            timestamp = futureTime,
+            task = "Review presentation",
+            isEnabled = true,
+            status = "SCHEDULED"
+        )
+        current = repository.getNoteById(note.id)
+        assertNotNull(current)
+        assertTrue(current!!.isReminderEnabled)
+        assertEquals("SCHEDULED", current.reminderStatus)
+
+        // 4. Remove reminder: clears reminder data, but audio file & note remain intact
+        repository.updateReminderDetails(
+            id = note.id,
+            timestamp = null,
+            task = null,
+            isEnabled = false,
+            status = "NONE"
+        )
+        current = repository.getNoteById(note.id)
+        assertNotNull(current)
+        assertEquals("NONE", current!!.reminderStatus)
+        assertNull(current.reminderTimestamp)
+        assertNull(current.reminderTask)
+        assertTrue(File(current.filePath).exists())
+    }
+
+    @Test
+    fun transcription_modesPersistenceAndDefaultScheduling() {
+        val prefs = com.example.data.NotebookPreferences(context)
+
+        // Default mode is AUTO_SELECT
+        assertEquals(com.example.data.TranscriptionMode.AUTO_SELECT, prefs.settings.value.transcriptionMode)
+
+        // Toggle to LOCAL_ONLY
+        prefs.setTranscriptionMode(com.example.data.TranscriptionMode.LOCAL_ONLY)
+        assertEquals(com.example.data.TranscriptionMode.LOCAL_ONLY, prefs.settings.value.transcriptionMode)
+
+        // Toggle to CLOUD_ONLY
+        prefs.setTranscriptionMode(com.example.data.TranscriptionMode.CLOUD_ONLY)
+        assertEquals(com.example.data.TranscriptionMode.CLOUD_ONLY, prefs.settings.value.transcriptionMode)
+
+        // Reload prefs and verify persistence
+        val reloadedPrefs = com.example.data.NotebookPreferences(context)
+        assertEquals(com.example.data.TranscriptionMode.CLOUD_ONLY, reloadedPrefs.settings.value.transcriptionMode)
+
+        // Verify default automatic reminder scheduling is true for unconfigured preferences
+        assertTrue(prefs.settings.value.autoReminderScheduling)
+    }
+
+    @Test
+    fun reminder_scheduleAlarmFailureHandling() {
+        val reminderManager = com.example.reminder.ReminderManager(context)
+
+        // Scheduling an alarm with a past timestamp must return false (does not claim success)
+        val pastTime = System.currentTimeMillis() - 60000L
+        val success = reminderManager.scheduleAlarm(
+            noteId = 9999L,
+            title = "Past Reminder",
+            text = "This should fail",
+            targetTimestampMs = pastTime
+        )
+        assertFalse(success)
+    }
 }
+

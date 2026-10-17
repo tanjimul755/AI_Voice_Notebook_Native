@@ -163,29 +163,40 @@ class ReminderManager(private val context: Context) {
      *
      * Rules:
      * 1. Returns null for ordinary non-reminder statements (e.g. "I need to buy milk tomorrow").
-     * 2. Returns IGNORE action for negative requests (e.g. "Don't remind me to buy milk").
+     * 2. Returns IGNORE action for negative requests (e.g. "Don't set a reminder", "Don't remind me").
      * 3. Returns CANCEL action for cancellation requests (e.g. "Cancel my medicine reminder").
      * 4. Returns UPDATE action for reschedule requests (e.g. "Change my bill reminder to 7 PM").
-     * 5. For positive reminder intent: parses explicit dates and times without ever inventing fake times.
+     * 5. For positive reminder intent: parses explicit dates, clock times, and relative delays without inventing fake times.
      */
     fun detectReminder(transcript: String): DetectedReminder? {
         if (transcript.isBlank()) return null
         val lower = transcript.lowercase(Locale.ROOT).trim()
 
-        // 1. Negative request check
-        val isNegative = lower.contains("don't remind me") ||
+        // 1. Negative request check - MUST NEVER create a reminder
+        val isNegative = lower.contains("don't set a reminder") ||
+                lower.contains("dont set a reminder") ||
+                lower.contains("do not set a reminder") ||
+                lower.contains("don't set any reminder") ||
+                lower.contains("don't remind me") ||
                 lower.contains("dont remind me") ||
                 lower.contains("do not remind me") ||
                 lower.contains("never remind me") ||
+                lower.contains("please do not remind") ||
+                lower.contains("রিমাইন্ডার সেট করো না") ||
+                lower.contains("রিমাইন্ডার সেট কর না") ||
+                lower.contains("রিমাইন্ডার দিও না") ||
+                lower.contains("মনে করিয়ে দিও না") ||
+                lower.contains("মনে করিয়ে দিও না") ||
+                lower.contains("মনে করাবে না") ||
+                lower.contains("মনে করানোর দরকার নেই") ||
+                lower.contains("reminder set koro na") ||
                 lower.contains("remind koro na") ||
                 lower.contains("remind korio na") ||
                 lower.contains("remind korbe na") ||
                 lower.contains("mone koriye dio na") ||
                 lower.contains("mone korio na") ||
-                lower.contains("মনে করিয়ে দিও না") ||
-                lower.contains("মনে করিয়ে দিও না") ||
-                lower.contains("মনে করাবে না") ||
-                lower.contains("মনে করানোর দরকার নেই")
+                lower.contains("bhule jete paro")
+
         if (isNegative) {
             return DetectedReminder(
                 action = ReminderAction.IGNORE,
@@ -240,24 +251,41 @@ class ReminderManager(private val context: Context) {
 
         // 4. Positive explicit reminder intent check
         val hasExplicitIntent = lower.contains("remind me") ||
+                lower.contains("set a reminder") ||
+                lower.contains("set the reminder") ||
                 lower.contains("remember to") ||
+                lower.contains("don't let me forget") ||
+                lower.contains("dont let me forget") ||
+                lower.contains("do not let me forget") ||
                 lower.contains("don't forget") ||
                 lower.contains("dont forget") ||
                 lower.contains("do not forget") ||
                 lower.contains("please remind") ||
                 lower.contains("remind koro") ||
                 lower.contains("remind korio") ||
+                lower.contains("reminder set koro") ||
+                lower.contains("reminder dao") ||
+                lower.contains("amake mone koriye dio") ||
                 lower.contains("mone koriye dio") ||
                 lower.contains("mone korie dio") ||
                 lower.contains("mone rekho") ||
+                lower.contains("bhulte dio na") ||
                 lower.contains("bhule jeo na") ||
                 lower.contains("bhule jeyo na") ||
+                lower.contains("রিমাইন্ডার সেট কর") ||
+                lower.contains("রিমাইন্ডার সেট করুন") ||
+                lower.contains("রিমাইন্ডার দাও") ||
+                lower.contains("রিমাইন্ডার দিন") ||
                 lower.contains("মনে করিয়ে দিও") ||
                 lower.contains("মনে করিয়ে দিও") ||
+                lower.contains("মনে করিয়ে দেবে") ||
+                lower.contains("মনে করিয়ে দেবে") ||
                 lower.contains("মনে রেখো") ||
+                lower.contains("ভুলতে দিও না") ||
                 lower.contains("ভুলে যেও না") ||
                 lower.contains("ভুলে যেওনা") ||
-                lower.contains("স্মরণ করিয়ে দিও")
+                lower.contains("স্মরণ করিয়ে দিও") ||
+                lower.contains("স্মরণ করিয়ে দিও")
 
         // Ordinary statements like "I need to buy milk tomorrow" or "Meeting at 5" without reminder trigger return null
         if (!hasExplicitIntent) {
@@ -267,7 +295,7 @@ class ReminderManager(private val context: Context) {
         // Extract clean task summary
         val taskSummary = extractTaskSummary(transcript)
 
-        // Attempt to parse explicit time/date
+        // Attempt to parse explicit time/date (including relative delays)
         val targetTimestamp = parseExplicitTimestamp(lower)
 
         return DetectedReminder(
@@ -300,51 +328,84 @@ class ReminderManager(private val context: Context) {
         var text = rawText.trim()
         val lower = text.lowercase(Locale.ROOT)
 
-        // Check English "to [task]" pattern: e.g. "Remind me tomorrow at 10 AM to renew my data pack."
+        // Pattern A: "Remind me that [task] after X" -> e.g. "Remind me that this app works after 10 seconds."
+        val thatPattern = Pattern.compile("(?i)(?:remind me that|set a reminder that)\\s+(.+?)(?:\\s+(?:after|in)\\s+\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)|\\s+at\\s+\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?|\\s+tomorrow|\\s*$)")
+        val thatMatcher = thatPattern.matcher(text)
+        if (thatMatcher.find()) {
+            val cand = thatMatcher.group(1)?.trim()?.trimEnd('.', '!', '?')
+            if (!cand.isNullOrBlank() && cand.length >= 2) {
+                return cand
+            }
+        }
+
+        // Pattern B: English "to [task]" pattern: e.g. "Remind me tomorrow at 10 AM to renew my data pack."
         val toIndex = lower.lastIndexOf(" to ")
         if (toIndex != -1 && toIndex + 4 < text.length) {
-            val candidate = text.substring(toIndex + 4).trim().trimEnd('.', '!', '?')
+            var candidate = text.substring(toIndex + 4).trim()
+            candidate = stripTrailingTimePhrases(candidate)
             if (candidate.length >= 3) return candidate.replaceFirstChar { it.uppercase() }
         }
 
-        // Check "don't forget to [task]"
-        val dontForgetIdx = lower.indexOf("forget to ")
-        if (dontForgetIdx != -1 && dontForgetIdx + 10 < text.length) {
-            val candidate = text.substring(dontForgetIdx + 10).trim().trimEnd('.', '!', '?')
-            val cutAt = candidate.indexOf(" at ")
-            val clean = if (cutAt > 0) candidate.substring(0, cutAt) else candidate
-            if (clean.length >= 3) return clean.replaceFirstChar { it.uppercase() }
+        // Pattern C: "don't forget to [task]" / "remember to [task]"
+        val forgetIdx = when {
+            lower.contains("forget to ") -> lower.indexOf("forget to ") + 10
+            lower.contains("remember to ") -> lower.indexOf("remember to ") + 12
+            else -> -1
+        }
+        if (forgetIdx != -1 && forgetIdx < text.length) {
+            var candidate = text.substring(forgetIdx).trim()
+            candidate = stripTrailingTimePhrases(candidate)
+            if (candidate.length >= 3) return candidate.replaceFirstChar { it.uppercase() }
         }
 
-        // Check Bangla "ওষুধ খাওয়ার কথা মনে করিয়ে দিও" -> extract before "মনে করিয়ে দিও" / "ভুলে যেও না"
-        val banglaEndings = listOf("মনে করিয়ে দিও", "মনে করিয়ে দিও", "ভুলে যেও না", "mone koriye dio", "bhule jeo na")
+        // Pattern D: Bangla "ওষুধ খাওয়ার কথা মনে করিয়ে দিও" -> extract before "মনে করিয়ে দিও" / "ভুলে যেও না"
+        val banglaEndings = listOf("মনে করিয়ে দিও", "মনে করিয়ে দিও", "মনে করিয়ে দেবে", "মনে করিয়ে দেবে", "ভুলতে দিও না", "ভুলে যেও না", "mone koriye dio", "bhulte dio na", "bhule jeo na")
         for (ending in banglaEndings) {
             val idx = text.indexOf(ending)
             if (idx > 0) {
                 var candidate = text.substring(0, idx).trim()
-                // Remove leading time phrases if present: "কাল সকাল ১০টায় আমাকে ওষুধ খাওয়ার কথা"
                 val prefixes = listOf("আমাকে", "amake", "কাল", "কালকে", "kal", "kaalke", "shokal", "bikal", "please", "day after tomorrow", "tomorrow")
                 for (prefix in prefixes) {
                     if (candidate.startsWith(prefix, ignoreCase = true)) {
                         candidate = candidate.substring(prefix.length).trim()
                     }
                 }
+                candidate = stripTrailingTimePhrases(candidate)
                 if (candidate.length >= 3) {
                     return candidate.trimEnd('.', '!', '?').replaceFirstChar { it.uppercase() }
                 }
             }
         }
 
-        // Default: clean boilerplate and cap at 60 characters
-        val clean = text
-            .replace("(?i)remind me (?:to |about )?".toRegex(), "")
-            .replace("(?i)don't forget (?:to )?".toRegex(), "")
-            .replace("(?i)dont forget (?:to )?".toRegex(), "")
-            .replace("(?i)please remind (?:me )?".toRegex(), "")
+        // Default: clean leading boilerplate and strip trailing temporal phrases
+        var clean = text
+            .replace("(?i)^remind me (?:that |to |about )?".toRegex(), "")
+            .replace("(?i)^set (?:a |the )?reminder (?:that |to |about )?".toRegex(), "")
+            .replace("(?i)^don't let me forget (?:to )?".toRegex(), "")
+            .replace("(?i)^dont let me forget (?:to )?".toRegex(), "")
+            .replace("(?i)^don't forget (?:to )?".toRegex(), "")
+            .replace("(?i)^dont forget (?:to )?".toRegex(), "")
+            .replace("(?i)^please remind (?:me )?(?:to |that )?".toRegex(), "")
+            .replace("(?i)^রিমাইন্ডার সেট কর(?:ুন)?\\s*".toRegex(), "")
+            .replace("(?i)^রিমাইন্ডার দাও\\s*".toRegex(), "")
+            .replace("(?i)^reminder set koro\\s*".toRegex(), "")
+            .replace("(?i)^amake mone koriye dio\\s*".toRegex(), "")
             .trim()
-            .take(60)
 
-        return clean.ifBlank { "Voice Note Reminder" }.replaceFirstChar { it.uppercase() }
+        clean = stripTrailingTimePhrases(clean)
+
+        return clean.ifBlank { "Voice Note Reminder" }
+    }
+
+    private fun stripTrailingTimePhrases(input: String): String {
+        return input
+            .replace("(?i)\\s+(?:after|in)\\s+\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\\.?$".toRegex(), "")
+            .replace("(?i)\\s+\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\\s*(?:later|after|pore|por)\\.?$".toRegex(), "")
+            .replace("(?i)\\s+\\d+\\s*(?:সেকেন্ড|মিনিট|ঘণ্টা|ঘন্টা)\\s*(?:পর|পরে)\\.?$".toRegex(), "")
+            .replace("(?i)\\s+(?:tomorrow|yesterday|today|কাল|কালকে|পরশু)(?:\\s+at\\s+\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?)?\\.?$".toRegex(), "")
+            .replace("(?i)\\s+at\\s+\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?\\.?$".toRegex(), "")
+            .trim()
+            .trimEnd('.', '!', '?')
     }
 
     private fun normalizeDigits(input: String): String {
@@ -362,11 +423,51 @@ class ReminderManager(private val context: Context) {
     }
 
     /**
-     * Parses explicit date and time expressions. Returns null if missing or ambiguous.
+     * Parses explicit date, clock time, and relative delay expressions.
+     * Returns null if missing or ambiguous without inventing a fake time.
      */
-    private fun parseExplicitTimestamp(rawText: String): Long? {
+    fun parseExplicitTimestamp(rawText: String): Long? {
         val text = normalizeDigits(rawText)
         val now = Calendar.getInstance()
+
+        // 1. Relative seconds: e.g. "after 10 seconds", "in 10 seconds", "10 seconds later", "10 second pore", "১০ সেকেন্ড পর"
+        val secMatcher = Pattern.compile(
+            "(?:after|in)\\s+(\\d+)\\s*(?:seconds?|secs?|second|sec)\\b|(\\d+)\\s*(?:seconds?|secs?|second|sec)\\s*(?:later|after|pore|por)\\b|(\\d+)\\s*(?:সেকেন্ড|সেঃ)\\s*(?:পর|পরে)",
+            Pattern.CASE_INSENSITIVE
+        ).matcher(text)
+        if (secMatcher.find()) {
+            val secs = secMatcher.group(1)?.toLongOrNull()
+                ?: secMatcher.group(2)?.toLongOrNull()
+                ?: secMatcher.group(3)?.toLongOrNull()
+                ?: 10L
+            return now.timeInMillis + (secs * 1000L)
+        }
+
+        // 2. Relative minutes: e.g. "after 5 minutes", "in 5 minutes", "5 minutes later", "5 minute pore", "৫ মিনিট পর"
+        val minMatcher = Pattern.compile(
+            "(?:after|in)\\s+(\\d+)\\s*(?:minutes?|mins?|minute|min)\\b|(\\d+)\\s*(?:minutes?|mins?|minute|min)\\s*(?:later|after|pore|por)\\b|(\\d+)\\s*(?:মিনিট|মিঃ)\\s*(?:পর|পরে)",
+            Pattern.CASE_INSENSITIVE
+        ).matcher(text)
+        if (minMatcher.find()) {
+            val mins = minMatcher.group(1)?.toLongOrNull()
+                ?: minMatcher.group(2)?.toLongOrNull()
+                ?: minMatcher.group(3)?.toLongOrNull()
+                ?: 5L
+            return now.timeInMillis + (mins * 60 * 1000L)
+        }
+
+        // 3. Relative hours: e.g. "after 2 hours", "in 2 hours", "2 hours later", "২ ঘণ্টা পর"
+        val hrMatcher = Pattern.compile(
+            "(?:after|in)\\s+(\\d+)\\s*(?:hours?|hrs?|hour|hr)\\b|(\\d+)\\s*(?:hours?|hrs?|hour|hr)\\s*(?:later|after|pore|por)\\b|(\\d+)\\s*(?:ঘণ্টা|ঘন্টা)\\s*(?:পর|পরে)",
+            Pattern.CASE_INSENSITIVE
+        ).matcher(text)
+        if (hrMatcher.find()) {
+            val hrs = hrMatcher.group(1)?.toLongOrNull()
+                ?: hrMatcher.group(2)?.toLongOrNull()
+                ?: hrMatcher.group(3)?.toLongOrNull()
+                ?: 1L
+            return now.timeInMillis + (hrs * 3600 * 1000L)
+        }
 
         // Check relative day offset
         var dayOffset = 0
@@ -376,23 +477,9 @@ class ReminderManager(private val context: Context) {
             dayOffset = 2
         }
 
-        // Relative hours / minutes: e.g. "in 2 hours", "in 30 minutes"
-        val inHoursMatcher = Pattern.compile("in\\s+(\\d+)\\s+hours?", Pattern.CASE_INSENSITIVE).matcher(text)
-        if (inHoursMatcher.find()) {
-            val hours = inHoursMatcher.group(1)?.toIntOrNull() ?: 1
-            return now.timeInMillis + (hours * 3600 * 1000L)
-        }
-
-        val inMinsMatcher = Pattern.compile("in\\s+(\\d+)\\s+minutes?", Pattern.CASE_INSENSITIVE).matcher(text)
-        if (inMinsMatcher.find()) {
-            val mins = inMinsMatcher.group(1)?.toIntOrNull() ?: 30
-            return now.timeInMillis + (mins * 60 * 1000L)
-        }
-
-        // Pattern 1: standard 12-hour English "10 AM", "6 PM", "5:30 pm", "10:00 am"
+        // 4. Standard 12-hour English "10 AM", "6 PM", "5:30 pm", "10:00 am"
         val timePattern12 = Pattern.compile("(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)", Pattern.CASE_INSENSITIVE)
         val matcher12 = timePattern12.matcher(text)
-
         if (matcher12.find()) {
             val hourStr = matcher12.group(1) ?: return null
             val minStr = matcher12.group(2) ?: "00"
@@ -419,12 +506,12 @@ class ReminderManager(private val context: Context) {
             return cal.timeInMillis
         }
 
-        // Pattern 2: Bengali numerals or Bengali / Banglish speech (e.g. সকাল ১০টায়, বিকাল ৫টায়, রাত ৮টায়, 10tay)
+        // 5. Bengali numerals or Bengali / Banglish speech (e.g. সকাল ১০টায়, বিকাল ৫টায়, রাত ৮টায়, 10tay)
         val isPmBangla = text.contains("বিকাল") || text.contains("দুপুর") || text.contains("সন্ধ্যা") || text.contains("রাত") ||
                 text.contains("bikal") || text.contains("dupur") || text.contains("shondha") || text.contains("raat")
         val isAmBangla = text.contains("সকাল") || text.contains("ভোর") || text.contains("shokal") || text.contains("bhor")
 
-        val numMatcher = Pattern.compile("(\\d{1,2})(?::(\\d{2}))?\\s*(?:টায়|টায়|টা|tay|ta)\\b", Pattern.CASE_INSENSITIVE).matcher(text)
+        val numMatcher = Pattern.compile("(\\d{1,2})(?::(\\d{2}))?\\s*(?:টায়|টায়|টা|tay|ta)(?![a-zA-Z0-9])", Pattern.CASE_INSENSITIVE).matcher(text)
         if (numMatcher.find()) {
             val hourStr = numMatcher.group(1) ?: return null
             val minStr = numMatcher.group(2) ?: "00"
@@ -453,7 +540,7 @@ class ReminderManager(private val context: Context) {
 
     /**
      * Schedules a system alarm for the note at targetTimestampMs.
-     * Uses stable PendingIntent IDs (noteId.toInt()) to prevent cross-note overwrites.
+     * Prevents duplicate alarms by cancelling any prior alarm for this note first.
      */
     fun scheduleAlarm(
         noteId: Long,
@@ -465,6 +552,9 @@ class ReminderManager(private val context: Context) {
             Log.w(TAG, "Cannot schedule alarm in the past: $targetTimestampMs")
             return false
         }
+
+        // Cancel previous alarm if any to prevent duplicates
+        cancelAlarm(noteId)
 
         return try {
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
@@ -483,13 +573,22 @@ class ReminderManager(private val context: Context) {
 
             // Android exact alarm check with safe fallback
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                if (alarmManager.canScheduleExactAlarms()) {
-                    alarmManager.setExactAndAllowWhileIdle(
-                        AlarmManager.RTC_WAKEUP,
-                        targetTimestampMs,
-                        pendingIntent
-                    )
-                } else {
+                try {
+                    if (alarmManager.canScheduleExactAlarms()) {
+                        alarmManager.setExactAndAllowWhileIdle(
+                            AlarmManager.RTC_WAKEUP,
+                            targetTimestampMs,
+                            pendingIntent
+                        )
+                    } else {
+                        alarmManager.setAndAllowWhileIdle(
+                            AlarmManager.RTC_WAKEUP,
+                            targetTimestampMs,
+                            pendingIntent
+                        )
+                    }
+                } catch (se: SecurityException) {
+                    Log.w(TAG, "Exact alarm permission denied, falling back to inexact idle alarm", se)
                     alarmManager.setAndAllowWhileIdle(
                         AlarmManager.RTC_WAKEUP,
                         targetTimestampMs,
@@ -512,7 +611,7 @@ class ReminderManager(private val context: Context) {
             Log.i(TAG, "Alarm scheduled successfully for note $noteId at $targetTimestampMs")
             true
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to schedule alarm", e)
+            Log.e(TAG, "Failed to schedule alarm for note $noteId", e)
             false
         }
     }

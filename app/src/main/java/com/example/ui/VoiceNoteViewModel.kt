@@ -559,6 +559,10 @@ class VoiceNoteViewModel(
         notebookPreferences.setDefaultTranscriptionFormat(format)
     }
 
+    fun setTranscriptionMode(mode: com.example.data.TranscriptionMode) {
+        notebookPreferences.setTranscriptionMode(mode)
+    }
+
     fun setAutoReminderDetection(enabled: Boolean) {
         notebookPreferences.setAutoReminderDetection(enabled)
     }
@@ -590,12 +594,16 @@ class VoiceNoteViewModel(
                     id = note.id,
                     timestamp = timestampMs,
                     task = task.ifBlank { note.title },
-                    isEnabled = true,
-                    status = "SCHEDULED"
+                    isEnabled = scheduled,
+                    status = if (scheduled) "SCHEDULED" else "UNSCHEDULED"
                 )
                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                     activeReminderDialogNote = null,
-                    infoMessage = if (scheduled) "Reminder scheduled for ${AudioFileManager.formatTimestamp(timestampMs)}" else "Reminder saved"
+                    infoMessage = if (scheduled) {
+                        "Reminder scheduled for ${AudioFileManager.formatTimestamp(timestampMs)}"
+                    } else {
+                        "Reminder saved, but alarm scheduling failed (check alarm/notification permissions)."
+                    }
                 )
             } else {
                 reminderManager.cancelAlarm(note.id)
@@ -642,97 +650,193 @@ class VoiceNoteViewModel(
      */
     private fun processAutomaticTranscription(note: VoiceNote) {
         val currentSettings = _dialogsAndMessages.value.settings
-        val format = currentSettings.defaultTranscriptionFormat
-        val allowCloud = currentSettings.cloudAiEnabled && geminiTranscriber.isApiKeyConfigured()
-        val allowFallback = currentSettings.autoGeminiFallback && allowCloud
+        if (!currentSettings.autoTranscription) return
 
+        val mode = currentSettings.transcriptionMode
+        val format = currentSettings.defaultTranscriptionFormat
+        val isGeminiConfigured = geminiTranscriber.isApiKeyConfigured()
         val audioFile = File(note.filePath)
         if (!audioFile.exists() || audioFile.length() == 0L) return
 
-        val whisperStatus = audioTranscriber.getModelStatus()
+        when (mode) {
+            com.example.data.TranscriptionMode.AUTO_SELECT -> {
+                // Mode A: Auto-select
+                // Uses local Whisper first where available; falls back to Gemini cloud AI
+                // when Whisper is unavailable, fails, or produces low-quality/empty/repetitive output.
+                val whisperStatus = audioTranscriber.getModelStatus()
+                if (whisperStatus.isAvailable) {
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        transcribingNoteId = note.id,
+                        infoMessage = "Voice note saved. Transcribing locally..."
+                    )
+                    viewModelScope.launch {
+                        transcriptionMutex.withLock {
+                            try {
+                                val whisperResult = audioTranscriber.transcribe(audioFile, preferredLanguage)
+                                val whisperText = whisperResult.getOrNull()?.trim()
 
-        if (whisperStatus.isAvailable) {
-            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                transcribingNoteId = note.id,
-                infoMessage = "Voice note saved. Transcribing locally..."
-            )
+                                val isFailedOrEmpty = whisperResult.isFailure ||
+                                        whisperText.isNullOrBlank() ||
+                                        whisperText == "[No speech detected in audio]"
+                                val isHallucination = !whisperText.isNullOrBlank() && isRepetitiveLoop(whisperText)
 
-            viewModelScope.launch {
-                transcriptionMutex.withLock {
-                    try {
-                        val whisperResult = audioTranscriber.transcribe(audioFile, preferredLanguage)
-                        val whisperText = whisperResult.getOrNull()?.trim()
+                                val shouldFallback = isGeminiConfigured && (isFailedOrEmpty || isHallucination)
 
-                        val isFailedOrEmpty = whisperResult.isFailure ||
-                                whisperText.isNullOrBlank() ||
-                                whisperText == "[No speech detected in audio]"
-                        val isHallucination = !whisperText.isNullOrBlank() && isRepetitiveLoop(whisperText)
-                        val isSpecializedFormat = (format == GeminiTranscriptionFormat.ROMANIZED_BANGLA ||
-                                format == GeminiTranscriptionFormat.ENGLISH)
-
-                        val shouldUseFallback = allowFallback && (isFailedOrEmpty || isHallucination || isSpecializedFormat)
-
-                        if (shouldUseFallback) {
-                            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                                transcribingNoteId = null,
-                                aiTranscribingNoteId = note.id,
-                                infoMessage = "Falling back to Gemini AI (${format.displayName})..."
-                            )
-                            val geminiResult = geminiTranscriber.transcribeAudio(audioFile, format)
-                            if (geminiResult.isSuccess) {
-                                val transcript = geminiResult.getOrThrow()
-                                repository.updateTranscription(note.id, transcript)
-                                applyTitleAndReminders(note, transcript)
-                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                                    aiTranscribingNoteId = null,
-                                    infoMessage = "Transcribed with Gemini AI (${format.displayName})"
-                                )
-                            } else {
-                                // Fallback failed (e.g. rate limit, offline). If whisper had non-empty text, retain it.
-                                if (!whisperText.isNullOrBlank() && whisperText != "[No speech detected in audio]") {
-                                    repository.updateTranscription(note.id, whisperText)
-                                    applyTitleAndReminders(note, whisperText)
+                                if (shouldFallback) {
                                     _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                                        aiTranscribingNoteId = null,
-                                        infoMessage = "Local transcript saved (AI fallback unavailable: ${geminiResult.exceptionOrNull()?.message})"
+                                        transcribingNoteId = null,
+                                        aiTranscribingNoteId = note.id,
+                                        infoMessage = "Falling back to Gemini AI (${format.displayName})..."
                                     )
+                                    val geminiResult = geminiTranscriber.transcribeAudio(audioFile, format)
+                                    if (geminiResult.isSuccess) {
+                                        val transcript = geminiResult.getOrThrow()
+                                        repository.updateTranscription(note.id, transcript)
+                                        applyTitleAndReminders(note, transcript)
+                                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                            aiTranscribingNoteId = null,
+                                            infoMessage = "Transcribed with Gemini AI (${format.displayName})"
+                                        )
+                                    } else {
+                                        if (!whisperText.isNullOrBlank() && whisperText != "[No speech detected in audio]") {
+                                            repository.updateTranscription(note.id, whisperText)
+                                            applyTitleAndReminders(note, whisperText)
+                                            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                                aiTranscribingNoteId = null,
+                                                infoMessage = "Local transcript saved (AI fallback failed: ${geminiResult.exceptionOrNull()?.message})"
+                                            )
+                                        } else {
+                                            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                                aiTranscribingNoteId = null,
+                                                errorMessage = "Transcription failed: ${geminiResult.exceptionOrNull()?.message}"
+                                            )
+                                        }
+                                    }
                                 } else {
-                                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                                        aiTranscribingNoteId = null,
-                                        errorMessage = "Transcription failed: ${geminiResult.exceptionOrNull()?.message}"
-                                    )
+                                    if (whisperResult.isSuccess && !whisperText.isNullOrBlank()) {
+                                        repository.updateTranscription(note.id, whisperText)
+                                        applyTitleAndReminders(note, whisperText)
+                                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                            transcribingNoteId = null,
+                                            infoMessage = "Transcription saved to note"
+                                        )
+                                    } else {
+                                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                            transcribingNoteId = null,
+                                            errorMessage = "Local transcription failed: ${whisperResult.exceptionOrNull()?.message ?: "No speech recognized"}"
+                                        )
+                                    }
                                 }
-                            }
-                        } else {
-                            if (whisperResult.isSuccess && !whisperText.isNullOrBlank()) {
-                                repository.updateTranscription(note.id, whisperText)
-                                applyTitleAndReminders(note, whisperText)
+                            } catch (e: Exception) {
                                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                                     transcribingNoteId = null,
-                                    infoMessage = "Transcription saved to note"
-                                )
-                            } else {
-                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                                    transcribingNoteId = null,
-                                    errorMessage = "Transcription failed: ${whisperResult.exceptionOrNull()?.message ?: "No speech recognized"}"
+                                    aiTranscribingNoteId = null,
+                                    errorMessage = "Transcription error: ${e.message}"
                                 )
                             }
                         }
-                    } catch (e: Exception) {
+                    }
+                } else {
+                    // Whisper model is not downloaded
+                    if (isGeminiConfigured) {
                         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                            transcribingNoteId = null,
-                            aiTranscribingNoteId = null,
-                            errorMessage = "Transcription error: ${e.message}"
+                            aiTranscribingNoteId = note.id,
+                            infoMessage = "Whisper model not downloaded. Transcribing with Gemini AI..."
+                        )
+                        viewModelScope.launch {
+                            transcriptionMutex.withLock {
+                                try {
+                                    val geminiResult = geminiTranscriber.transcribeAudio(audioFile, format)
+                                    if (geminiResult.isSuccess) {
+                                        val transcript = geminiResult.getOrThrow()
+                                        repository.updateTranscription(note.id, transcript)
+                                        applyTitleAndReminders(note, transcript)
+                                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                            aiTranscribingNoteId = null,
+                                            infoMessage = "AI transcription completed (${format.displayName})"
+                                        )
+                                    } else {
+                                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                            aiTranscribingNoteId = null,
+                                            errorMessage = "AI transcription failed: ${geminiResult.exceptionOrNull()?.message}"
+                                        )
+                                    }
+                                } catch (e: Exception) {
+                                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                        aiTranscribingNoteId = null,
+                                        errorMessage = "AI transcription error: ${e.message}"
+                                    )
+                                }
+                            }
+                        }
+                    } else {
+                        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                            activeTranscribeDialogNote = note,
+                            modelStatus = whisperStatus,
+                            infoMessage = "Voice note saved. Offline Whisper model required for transcription."
                         )
                     }
                 }
             }
-        } else {
-            // Whisper model is not downloaded
-            if (allowFallback) {
+
+            com.example.data.TranscriptionMode.LOCAL_ONLY -> {
+                // Mode B: Local AI only
+                // Strictly offline Whisper. NEVER send audio to Gemini or cloud services.
+                val whisperStatus = audioTranscriber.getModelStatus()
+                if (whisperStatus.isAvailable) {
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        transcribingNoteId = note.id,
+                        infoMessage = "Transcribing with local Whisper..."
+                    )
+                    viewModelScope.launch {
+                        transcriptionMutex.withLock {
+                            try {
+                                val result = audioTranscriber.transcribe(audioFile, preferredLanguage)
+                                if (result.isSuccess) {
+                                    val transcript = result.getOrThrow()
+                                    repository.updateTranscription(note.id, transcript)
+                                    applyTitleAndReminders(note, transcript)
+                                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                        transcribingNoteId = null,
+                                        infoMessage = "Transcription saved to note (Local Whisper)"
+                                    )
+                                } else {
+                                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                        transcribingNoteId = null,
+                                        errorMessage = "Local transcription failed: ${result.exceptionOrNull()?.message}"
+                                    )
+                                }
+                            } catch (e: Exception) {
+                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                    transcribingNoteId = null,
+                                    errorMessage = "Local transcription error: ${e.message}"
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    // Whisper model missing: offer model download flow, NEVER call Gemini
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        activeTranscribeDialogNote = note,
+                        modelStatus = whisperStatus,
+                        infoMessage = "Local model required. Please download Whisper model to transcribe."
+                    )
+                }
+            }
+
+            com.example.data.TranscriptionMode.CLOUD_ONLY -> {
+                // Mode C: Cloud AI only
+                // Direct Gemini transcription. Never runs local Whisper.
+                if (!isGeminiConfigured) {
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        errorMessage = "Gemini API key is not configured in Secrets panel. Audio preserved."
+                    )
+                    return
+                }
+
                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                     aiTranscribingNoteId = note.id,
-                    infoMessage = "Whisper offline model missing. Transcribing with Gemini AI..."
+                    infoMessage = "Transcribing with Gemini AI (${format.displayName})..."
                 )
                 viewModelScope.launch {
                     transcriptionMutex.withLock {
@@ -749,23 +853,17 @@ class VoiceNoteViewModel(
                             } else {
                                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                                     aiTranscribingNoteId = null,
-                                    errorMessage = "AI transcription failed: ${geminiResult.exceptionOrNull()?.message}"
+                                    errorMessage = "Cloud transcription failed: ${geminiResult.exceptionOrNull()?.message}. Recording preserved."
                                 )
                             }
                         } catch (e: Exception) {
                             _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                                 aiTranscribingNoteId = null,
-                                errorMessage = "AI transcription error: ${e.message}"
+                                errorMessage = "Cloud transcription error: ${e.message}. Recording preserved."
                             )
                         }
                     }
                 }
-            } else {
-                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                    activeTranscribeDialogNote = note,
-                    modelStatus = whisperStatus,
-                    infoMessage = "Voice note saved. Offline Whisper model required for transcription."
-                )
             }
         }
     }
@@ -807,7 +905,7 @@ class VoiceNoteViewModel(
                             repository.findActiveReminderByQuery(query)
                         } ?: note
                         if (reminder.targetTimestampMs != null && reminder.targetTimestampMs > System.currentTimeMillis()) {
-                            reminderManager.scheduleAlarm(
+                            val scheduled = reminderManager.scheduleAlarm(
                                 noteId = targetNote.id,
                                 title = targetNote.reminderTask ?: targetNote.title,
                                 text = targetNote.transcription ?: "Voice note reminder",
@@ -817,11 +915,15 @@ class VoiceNoteViewModel(
                                 id = targetNote.id,
                                 timestamp = reminder.targetTimestampMs,
                                 task = targetNote.reminderTask,
-                                isEnabled = true,
-                                status = "SCHEDULED"
+                                isEnabled = scheduled,
+                                status = if (scheduled) "SCHEDULED" else "UNSCHEDULED"
                             )
                             _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                                infoMessage = "Reminder rescheduled for ${AudioFileManager.formatTimestamp(reminder.targetTimestampMs)}"
+                                infoMessage = if (scheduled) {
+                                    "Reminder rescheduled for ${AudioFileManager.formatTimestamp(reminder.targetTimestampMs)}"
+                                } else {
+                                    "Reminder rescheduled, but alarm scheduling failed (check alarm/notification permissions)."
+                                }
                             )
                         }
                     }
@@ -838,11 +940,15 @@ class VoiceNoteViewModel(
                                     id = note.id,
                                     timestamp = reminder.targetTimestampMs,
                                     task = reminder.taskSummary,
-                                    isEnabled = true,
-                                    status = "SCHEDULED"
+                                    isEnabled = scheduled,
+                                    status = if (scheduled) "SCHEDULED" else "UNSCHEDULED"
                                 )
                                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                                    infoMessage = if (scheduled) "Reminder scheduled for ${AudioFileManager.formatTimestamp(reminder.targetTimestampMs)}" else "Reminder detected: ${reminder.taskSummary}"
+                                    infoMessage = if (scheduled) {
+                                        "Reminder scheduled for ${AudioFileManager.formatTimestamp(reminder.targetTimestampMs)}"
+                                    } else {
+                                        "Reminder detected: ${reminder.taskSummary} (Alarm scheduling failed - check alarm permissions)"
+                                    }
                                 )
                             } else {
                                 repository.updateReminderDetails(
