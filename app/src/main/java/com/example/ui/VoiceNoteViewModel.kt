@@ -607,7 +607,7 @@ class VoiceNoteViewModel(
                 )
             } else {
                 reminderManager.cancelAlarm(note.id)
-                val status = if (timestampMs != null && timestampMs <= System.currentTimeMillis()) {
+                val status = if (note.reminderStatus == "COMPLETED") {
                     "COMPLETED"
                 } else if (isEnabled && timestampMs == null) {
                     "UNSCHEDULED"
@@ -624,6 +624,26 @@ class VoiceNoteViewModel(
                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                     activeReminderDialogNote = null,
                     infoMessage = if (!isEnabled) "Reminder disabled." else "Reminder updated."
+                )
+            }
+        }
+    }
+
+    fun markReminderCompleted(noteId: Long) {
+        viewModelScope.launch {
+            reminderManager.cancelAlarm(noteId)
+            com.example.reminder.ReminderRinger.stopRinging()
+            val note = repository.getNoteById(noteId)
+            if (note != null) {
+                repository.updateReminderDetails(
+                    id = noteId,
+                    timestamp = note.reminderTimestamp,
+                    task = note.reminderTask,
+                    isEnabled = false,
+                    status = "COMPLETED"
+                )
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    infoMessage = "Reminder marked as completed."
                 )
             }
         }

@@ -18,6 +18,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
@@ -57,6 +58,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
@@ -197,39 +199,33 @@ fun NoteItemCard(
                         else -> "Set time"
                     }
 
-                    val (pillIcon, pillText, pillBg, pillFg) = when {
-                        note.reminderStatus == "COMPLETED" -> {
-                            Quad(
-                                Icons.Default.CheckCircle,
-                                "$reminderTimeText (Done)",
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                                MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                        !note.isReminderEnabled -> {
-                            Quad(
-                                Icons.Default.NotificationsNone,
-                                if (note.reminderTimestamp != null) "$reminderTimeText (Off)" else "Off",
-                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.6f),
-                                MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
-                            )
-                        }
-                        note.reminderTimestamp == null -> {
-                            Quad(
-                                Icons.Default.Notifications,
-                                "Set time",
-                                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.85f),
-                                MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                        }
-                        else -> {
-                            Quad(
-                                Icons.Default.NotificationsActive,
-                                reminderTimeText,
-                                MaterialTheme.colorScheme.primaryContainer,
-                                MaterialTheme.colorScheme.onPrimaryContainer
-                            )
-                        }
+                    val isCompleted = note.reminderStatus == "COMPLETED"
+                    val isOff = !note.isReminderEnabled && !isCompleted
+
+                    val bellIcon = when {
+                        isCompleted -> Icons.Default.Notifications
+                        isOff -> Icons.Default.NotificationsNone
+                        note.reminderTimestamp == null -> Icons.Default.Notifications
+                        else -> Icons.Default.NotificationsActive
+                    }
+
+                    val pillBg = when {
+                        isCompleted -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        isOff -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        note.reminderTimestamp == null -> MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.85f)
+                        else -> MaterialTheme.colorScheme.primaryContainer
+                    }
+
+                    val pillFg = when {
+                        isCompleted -> MaterialTheme.colorScheme.onSurfaceVariant
+                        isOff -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                        note.reminderTimestamp == null -> MaterialTheme.colorScheme.onSecondaryContainer
+                        else -> MaterialTheme.colorScheme.onPrimaryContainer
+                    }
+
+                    val displayText = when {
+                        isOff -> if (note.reminderTimestamp != null) "$reminderTimeText (Off)" else "Off"
+                        else -> reminderTimeText
                     }
 
                     Surface(
@@ -244,17 +240,28 @@ fun NoteItemCard(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                imageVector = pillIcon,
-                                contentDescription = "Reminder: $pillText. Tap to edit.",
+                                imageVector = bellIcon,
+                                contentDescription = "Reminder: $displayText. Tap to edit.",
                                 tint = pillFg,
                                 modifier = Modifier.size(14.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = pillText,
+                                text = displayText,
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
                                 color = pillFg
                             )
+                            if (isCompleted) {
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Icon(
+                                    imageVector = Icons.Default.Check,
+                                    contentDescription = "Completed",
+                                    tint = Color(0xFF2E7D32),
+                                    modifier = Modifier
+                                        .size(13.dp)
+                                        .testTag("reminder_completed_indicator_${note.id}")
+                                )
+                            }
                         }
                     }
                 }

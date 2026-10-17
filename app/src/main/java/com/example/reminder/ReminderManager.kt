@@ -7,6 +7,8 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.media.AudioAttributes
+import android.media.RingtoneManager
 import android.os.Build
 import android.util.Log
 import androidx.core.app.NotificationCompat
@@ -42,77 +44,177 @@ data class DetectedReminder(
 )
 
 /**
- * BroadcastReceiver for firing scheduled voice note reminder notifications.
+ * BroadcastReceiver for handling scheduled voice note reminders,
+ * ringing alerts, and interactive notification actions.
  */
 class ReminderBroadcastReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
+        val action = intent.action
         val noteId = intent.getLongExtra(EXTRA_NOTE_ID, -1L)
-        val noteTitle = intent.getStringExtra(EXTRA_NOTE_TITLE) ?: "Voice Note Reminder"
-        val reminderText = intent.getStringExtra(EXTRA_REMINDER_TEXT) ?: "You have a scheduled voice note reminder."
 
-        val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        when (action) {
+            ACTION_DONE -> {
+                Log.i(TAG, "Done action received for reminder note ID: $noteId")
+                // 1. Immediately stop audible ringing alert
+                ReminderRinger.stopRinging()
 
-        // Create notification channel on Android 8.0+
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val channel = NotificationChannel(
-                CHANNEL_ID,
-                "Voice Note Reminders",
-                NotificationManager.IMPORTANCE_HIGH
-            ).apply {
-                description = "Notifications for scheduled voice note reminders"
-                enableVibration(true)
-            }
-            notificationManager.createNotificationChannel(channel)
-        }
+                // 2. Dismiss active notification
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                val notificationId = noteId.toInt().coerceAtLeast(1001)
+                notificationManager.cancel(notificationId)
 
-        val tapIntent = Intent(context, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
-            putExtra("target_note_id", noteId)
-        }
-        val pendingIntent = PendingIntent.getActivity(
-            context,
-            noteId.toInt(),
-            tapIntent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
-
-        val notification = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_popup_reminder)
-            .setContentTitle(noteTitle)
-            .setContentText(reminderText)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
-            .setAutoCancel(true)
-            .setContentIntent(pendingIntent)
-            .build()
-
-        notificationManager.notify(noteId.toInt().coerceAtLeast(1001), notification)
-
-        // Mark reminder as completed in Room database
-        if (noteId > 0) {
-            CoroutineScope(Dispatchers.IO).launch {
-                try {
-                    val db = AppDatabase.getDatabase(context)
-                    val note = db.voiceNoteDao().getVoiceNoteById(noteId)
-                    if (note != null) {
-                        db.voiceNoteDao().updateReminderDetails(
-                            id = noteId,
-                            timestamp = note.reminderTimestamp,
-                            task = note.reminderTask,
-                            isEnabled = false,
-                            status = "COMPLETED"
-                        )
+                // 3. Mark reminder as COMPLETED in persistent Room database
+                if (noteId > 0) {
+                    CoroutineScope(Dispatchers.IO).launch {
+                        try {
+                            val db = AppDatabase.getDatabase(context)
+                            val note = db.voiceNoteDao().getVoiceNoteById(noteId)
+                            if (note != null) {
+                                db.voiceNoteDao().updateReminderDetails(
+                                    id = noteId,
+                                    timestamp = note.reminderTimestamp,
+                                    task = note.reminderTask,
+                                    isEnabled = false,
+                                    status = "COMPLETED"
+                                )
+                                Log.i(TAG, "Note $noteId marked as COMPLETED in database")
+                            }
+                        } catch (e: Exception) {
+                            Log.e(TAG, "Failed to mark reminder completed in DB", e)
+                        }
                     }
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to mark reminder completed in DB", e)
                 }
+            }
+
+            ACTION_DISMISS -> {
+                Log.i(TAG, "Reminder notification dismissed/swiped for note ID: $noteId")
+                // Stop ringing alert; preserve incomplete status (do NOT mark completed!)
+                ReminderRinger.stopRinging()
+            }
+
+            else -> {
+                // Fired scheduled alarm
+                Log.i(TAG, "Reminder alarm triggered for note ID: $noteId")
+
+                // Verify notification permission before attempting notification delivery
+                if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) {
+                    Log.w(TAG, "Notification permission is disabled; cannot post reminder notification")
+                    return
+                }
+
+                val noteTitle = intent.getStringExtra(EXTRA_NOTE_TITLE) ?: "Voice Note Reminder"
+                val reminderTask = intent.getStringExtra(EXTRA_REMINDER_TASK) ?: noteTitle
+                val reminderText = intent.getStringExtra(EXTRA_REMINDER_TEXT) ?: "You have a scheduled voice note reminder."
+
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+                val soundUri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                    ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+
+                // Create notification channel on Android 8.0+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val audioAttributes = AudioAttributes.Builder()
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                        .setUsage(AudioAttributes.USAGE_ALARM)
+                        .build()
+
+                    val channel = NotificationChannel(
+                        CHANNEL_ID,
+                        "Voice Note Reminders",
+                        NotificationManager.IMPORTANCE_HIGH
+                    ).apply {
+                        description = "Notifications for scheduled voice note reminders"
+                        enableVibration(true)
+                        setSound(soundUri, audioAttributes)
+                    }
+                    notificationManager.createNotificationChannel(channel)
+                }
+
+                // 1. Start audible ringing alert with bounded duration (stops after 30 seconds automatically)
+                ReminderRinger.startRinging(context, durationMs = 30_000L)
+
+                // 2. Tapping notification opens MainActivity with target note ID
+                val tapIntent = Intent(context, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK
+                    this.action = ACTION_OPEN_NOTE
+                    putExtra("target_note_id", noteId)
+                }
+                val pendingContentIntent = PendingIntent.getActivity(
+                    context,
+                    noteId.toInt().coerceAtLeast(1001),
+                    tapIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                // 3. Functional Done action directly in the notification
+                val doneIntent = Intent(context, ReminderBroadcastReceiver::class.java).apply {
+                    this.action = ACTION_DONE
+                    putExtra(EXTRA_NOTE_ID, noteId)
+                }
+                val pendingDoneIntent = PendingIntent.getBroadcast(
+                    context,
+                    (noteId.toInt() * 10) + 1,
+                    doneIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+                val doneAction = NotificationCompat.Action.Builder(
+                    android.R.drawable.checkbox_on_background,
+                    "Done",
+                    pendingDoneIntent
+                ).build()
+
+                // 4. Delete intent when user swipes notification away (stops ringing)
+                val dismissIntent = Intent(context, ReminderBroadcastReceiver::class.java).apply {
+                    this.action = ACTION_DISMISS
+                    putExtra(EXTRA_NOTE_ID, noteId)
+                }
+                val pendingDismissIntent = PendingIntent.getBroadcast(
+                    context,
+                    (noteId.toInt() * 10) + 2,
+                    dismissIntent,
+                    PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+                )
+
+                val displayTitle = reminderTask.ifBlank { noteTitle }
+                val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.ic_popup_reminder)
+                    .setContentTitle(displayTitle)
+                    .setContentText(reminderText)
+                    .setSubText(noteTitle.takeIf { it != displayTitle })
+                    .setStyle(
+                        NotificationCompat.BigTextStyle()
+                            .setBigContentTitle(displayTitle)
+                            .bigText(reminderText)
+                    )
+                    .setPriority(NotificationCompat.PRIORITY_MAX)
+                    .setCategory(NotificationCompat.CATEGORY_ALARM)
+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                    .setSound(soundUri)
+                    .setAutoCancel(true)
+                    .setContentIntent(pendingContentIntent)
+                    .setDeleteIntent(pendingDismissIntent)
+                    .addAction(doneAction)
+                    .build()
+
+                val notificationId = noteId.toInt().coerceAtLeast(1001)
+                notificationManager.notify(notificationId, notification)
+
+                // PRESERVE INCOMPLETE STATUS:
+                // Do not mark reminder completed merely because its scheduled time passed
+                // or a notification was posted. Status updates to COMPLETED only when acknowledged.
             }
         }
     }
 
     companion object {
         const val CHANNEL_ID = "voice_note_reminders"
+        const val ACTION_FIRE_REMINDER = "com.example.reminder.ACTION_FIRE_REMINDER"
+        const val ACTION_DONE = "com.example.reminder.ACTION_DONE"
+        const val ACTION_DISMISS = "com.example.reminder.ACTION_DISMISS"
+        const val ACTION_OPEN_NOTE = "com.example.reminder.ACTION_OPEN_NOTE"
         const val EXTRA_NOTE_ID = "extra_note_id"
         const val EXTRA_NOTE_TITLE = "extra_note_title"
+        const val EXTRA_REMINDER_TASK = "extra_reminder_task"
         const val EXTRA_REMINDER_TEXT = "extra_reminder_text"
     }
 }
@@ -402,8 +504,10 @@ class ReminderManager(private val context: Context) {
             .replace("(?i)\\s+(?:after|in)\\s+\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\\.?$".toRegex(), "")
             .replace("(?i)\\s+\\d+\\s*(?:seconds?|secs?|minutes?|mins?|hours?|hrs?)\\s*(?:later|after|pore|por)\\.?$".toRegex(), "")
             .replace("(?i)\\s+\\d+\\s*(?:সেকেন্ড|মিনিট|ঘণ্টা|ঘন্টা)\\s*(?:পর|পরে)\\.?$".toRegex(), "")
-            .replace("(?i)\\s+(?:tomorrow|yesterday|today|কাল|কালকে|পরশু)(?:\\s+at\\s+\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?)?\\.?$".toRegex(), "")
-            .replace("(?i)\\s+at\\s+\\d{1,2}(?::\\d{2})?\\s*(?:am|pm)?\\.?$".toRegex(), "")
+            .replace("(?i)\\s+(?:tomorrow|yesterday|today|কাল|কালকে|পরশু)(?:\\s+at\\s+\\d{1,2}(?:[:.]\\d{2})?\\s*(?:am|pm|a\\.m\\.|p\\.m\\.)?)?\\.?$".toRegex(), "")
+            .replace("(?i)\\s+at\\s+\\d{1,2}(?:[:.]\\d{2})?\\s*(?:am|pm|a\\.m\\.|p\\.m\\.)?\\.?$".toRegex(), "")
+            .replace("(?i)\\s+\\d{1,2}(?:[:.]\\d{2})?\\s*(?:am|pm|a\\.m\\.|p\\.m\\.)\\.?$".toRegex(), "")
+            .replace("(?i)\\s+\\d{1,2}(?:[:.]\\d{2})?\\s*(?:টায়|টায়|টা|tay|ta)\\.?$".toRegex(), "")
             .trim()
             .trimEnd('.', '!', '?')
     }
@@ -424,10 +528,18 @@ class ReminderManager(private val context: Context) {
 
     /**
      * Parses explicit date, clock time, and relative delay expressions.
+     * Normalizes punctuation variants (such as 8.52 PM -> 8:52 PM).
+     * Validates hour and minute ranges strictly to reject invalid values.
      * Returns null if missing or ambiguous without inventing a fake time.
      */
     fun parseExplicitTimestamp(rawText: String): Long? {
-        val text = normalizeDigits(rawText)
+        val textWithDigits = normalizeDigits(rawText)
+
+        // Normalize unambiguous punctuation variants in clock times (e.g. "8.52 PM" -> "8:52 PM", "কাল সকাল ৮.৫২ টায়" -> "8:52 টায়")
+        val text = textWithDigits
+            .replace("(?i)(?<=\\b|\\s|^)(\\d{1,2})\\.(\\d{2})(?=\\s*(?:am|pm|a\\.m\\.|p\\.m\\.|টায়|টায়|টা|tay|ta)(?![a-zA-Z0-9]))".toRegex(), "$1:$2")
+            .replace("(?i)(?:at|around)\\s+(\\d{1,2})\\.(\\d{2})\\b".toRegex(), "at $1:$2")
+
         val now = Calendar.getInstance()
 
         // 1. Relative seconds: e.g. "after 10 seconds", "in 10 seconds", "10 seconds later", "10 second pore", "১০ সেকেন্ড পর"
@@ -477,58 +589,118 @@ class ReminderManager(private val context: Context) {
             dayOffset = 2
         }
 
-        // 4. Standard 12-hour English "10 AM", "6 PM", "5:30 pm", "10:00 am"
-        val timePattern12 = Pattern.compile("(\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)", Pattern.CASE_INSENSITIVE)
+        // Check explicit month and day e.g. "October 20", "20th October", "Oct 19"
+        val monthNames = mapOf(
+            "jan" to 0, "january" to 0, "feb" to 1, "february" to 1,
+            "mar" to 2, "march" to 2, "apr" to 3, "april" to 3,
+            "may" to 4, "jun" to 5, "june" to 5,
+            "jul" to 6, "july" to 6, "aug" to 7, "august" to 7,
+            "sep" to 8, "september" to 8, "oct" to 9, "october" to 9,
+            "nov" to 10, "november" to 10, "dec" to 11, "december" to 11
+        )
+        val monthRegex = "(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)"
+        val datePattern = Pattern.compile(
+            "(?:\\bon\\s+)?(?:($monthRegex)\\s+(\\d{1,2})(?:st|nd|rd|th)?|(\\d{1,2})(?:st|nd|rd|th)?\\s+($monthRegex))",
+            Pattern.CASE_INSENSITIVE
+        )
+        val dateMatcher = datePattern.matcher(text)
+        var explicitMonth: Int? = null
+        var explicitDay: Int? = null
+        if (dateMatcher.find()) {
+            val mStr = (dateMatcher.group(1) ?: dateMatcher.group(4))?.lowercase(Locale.ROOT)
+            val dStr = dateMatcher.group(2) ?: dateMatcher.group(3)
+            if (mStr != null && dStr != null) {
+                val d = dStr.toIntOrNull()
+                val m = monthNames[mStr.take(3)]
+                if (d != null && d in 1..31 && m != null) {
+                    explicitMonth = m
+                    explicitDay = d
+                }
+            }
+        }
+
+        // 4. Standard 12-hour English "10 AM", "6 PM", "5:30 pm", "8.52 PM", "10:00 am"
+        val timePattern12 = Pattern.compile("(\\d{1,2})(?:[:.](\\d{2}))?\\s*(am|pm|a\\.m\\.|p\\.m\\.)", Pattern.CASE_INSENSITIVE)
         val matcher12 = timePattern12.matcher(text)
         if (matcher12.find()) {
             val hourStr = matcher12.group(1) ?: return null
             val minStr = matcher12.group(2) ?: "00"
-            val amPm = matcher12.group(3)?.lowercase(Locale.ROOT) ?: "am"
+            val amPmRaw = matcher12.group(3)?.lowercase(Locale.ROOT) ?: "am"
+            val isPm = amPmRaw.startsWith("p")
 
-            var hour = hourStr.toIntOrNull() ?: return null
+            val hour = hourStr.toIntOrNull() ?: return null
             val min = minStr.toIntOrNull() ?: 0
 
-            if (amPm == "pm" && hour < 12) hour += 12
-            if (amPm == "am" && hour == 12) hour = 0
+            // Strict range validation: Reject invalid values instead of letting Calendar silently normalize
+            if (hour !in 1..12 || min !in 0..59) {
+                return null
+            }
+
+            var hourOfDay = hour
+            if (isPm && hour < 12) hourOfDay += 12
+            if (!isPm && hour == 12) hourOfDay = 0
 
             val cal = Calendar.getInstance().apply {
-                add(Calendar.DAY_OF_YEAR, dayOffset)
-                set(Calendar.HOUR_OF_DAY, hour)
+                if (explicitMonth != null && explicitDay != null) {
+                    set(Calendar.MONTH, explicitMonth)
+                    set(Calendar.DAY_OF_MONTH, explicitDay)
+                } else {
+                    add(Calendar.DAY_OF_YEAR, dayOffset)
+                }
+                set(Calendar.HOUR_OF_DAY, hourOfDay)
                 set(Calendar.MINUTE, min)
                 set(Calendar.SECOND, 0)
                 set(Calendar.MILLISECOND, 0)
             }
 
-            // If time is today and has already passed, advance to tomorrow
-            if (dayOffset == 0 && cal.timeInMillis <= now.timeInMillis) {
+            if (explicitMonth != null && explicitDay != null) {
+                if (cal.timeInMillis <= now.timeInMillis) {
+                    cal.add(Calendar.YEAR, 1)
+                }
+            } else if (dayOffset == 0 && cal.timeInMillis <= now.timeInMillis) {
                 cal.add(Calendar.DAY_OF_YEAR, 1)
             }
             return cal.timeInMillis
         }
 
-        // 5. Bengali numerals or Bengali / Banglish speech (e.g. সকাল ১০টায়, বিকাল ৫টায়, রাত ৮টায়, 10tay)
+        // 5. Bengali numerals or Bengali / Banglish speech (e.g. সকাল ১০টায়, বিকাল ৫টায়, রাত ৮টায়, 10tay, ৮.৫২ টায়)
         val isPmBangla = text.contains("বিকাল") || text.contains("দুপুর") || text.contains("সন্ধ্যা") || text.contains("রাত") ||
                 text.contains("bikal") || text.contains("dupur") || text.contains("shondha") || text.contains("raat")
         val isAmBangla = text.contains("সকাল") || text.contains("ভোর") || text.contains("shokal") || text.contains("bhor")
 
-        val numMatcher = Pattern.compile("(\\d{1,2})(?::(\\d{2}))?\\s*(?:টায়|টায়|টা|tay|ta)(?![a-zA-Z0-9])", Pattern.CASE_INSENSITIVE).matcher(text)
+        val numMatcher = Pattern.compile("(\\d{1,2})(?:[:.](\\d{2}))?\\s*(?:টায়|টায়|টা|tay|ta)(?![a-zA-Z0-9])", Pattern.CASE_INSENSITIVE).matcher(text)
         if (numMatcher.find()) {
             val hourStr = numMatcher.group(1) ?: return null
             val minStr = numMatcher.group(2) ?: "00"
-            var hour = hourStr.toIntOrNull() ?: return null
+            val hour = hourStr.toIntOrNull() ?: return null
             val min = minStr.toIntOrNull() ?: 0
 
-            if (isPmBangla && hour in 1..11) hour += 12
-            if (isAmBangla && hour == 12) hour = 0
+            // Strict range validation
+            if (hour !in 1..12 || min !in 0..59) {
+                return null
+            }
+
+            var hourOfDay = hour
+            if (isPmBangla && hour in 1..11) hourOfDay += 12
+            if (isAmBangla && hour == 12) hourOfDay = 0
 
             val cal = Calendar.getInstance().apply {
-                add(Calendar.DAY_OF_YEAR, dayOffset)
-                set(Calendar.HOUR_OF_DAY, hour)
+                if (explicitMonth != null && explicitDay != null) {
+                    set(Calendar.MONTH, explicitMonth)
+                    set(Calendar.DAY_OF_MONTH, explicitDay)
+                } else {
+                    add(Calendar.DAY_OF_YEAR, dayOffset)
+                }
+                set(Calendar.HOUR_OF_DAY, hourOfDay)
                 set(Calendar.MINUTE, min)
                 set(Calendar.SECOND, 0)
                 set(Calendar.MILLISECOND, 0)
             }
-            if (dayOffset == 0 && cal.timeInMillis <= now.timeInMillis) {
+            if (explicitMonth != null && explicitDay != null) {
+                if (cal.timeInMillis <= now.timeInMillis) {
+                    cal.add(Calendar.YEAR, 1)
+                }
+            } else if (dayOffset == 0 && cal.timeInMillis <= now.timeInMillis) {
                 cal.add(Calendar.DAY_OF_YEAR, 1)
             }
             return cal.timeInMillis
@@ -559,8 +731,10 @@ class ReminderManager(private val context: Context) {
         return try {
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
             val intent = Intent(context, ReminderBroadcastReceiver::class.java).apply {
+                action = ReminderBroadcastReceiver.ACTION_FIRE_REMINDER
                 putExtra(ReminderBroadcastReceiver.EXTRA_NOTE_ID, noteId)
                 putExtra(ReminderBroadcastReceiver.EXTRA_NOTE_TITLE, title)
+                putExtra(ReminderBroadcastReceiver.EXTRA_REMINDER_TASK, title)
                 putExtra(ReminderBroadcastReceiver.EXTRA_REMINDER_TEXT, text.take(120))
             }
 
@@ -626,12 +800,14 @@ class ReminderManager(private val context: Context) {
     }
 
     /**
-     * Cancels an existing scheduled alarm for the given note ID.
+     * Cancels an existing scheduled alarm and dismisses any active notification for the note ID.
      */
     fun cancelAlarm(noteId: Long): Boolean {
         return try {
             val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-            val intent = Intent(context, ReminderBroadcastReceiver::class.java)
+            val intent = Intent(context, ReminderBroadcastReceiver::class.java).apply {
+                action = ReminderBroadcastReceiver.ACTION_FIRE_REMINDER
+            }
             val pendingIntent = PendingIntent.getBroadcast(
                 context,
                 noteId.toInt(),
@@ -642,6 +818,11 @@ class ReminderManager(private val context: Context) {
                 alarmManager.cancel(pendingIntent)
                 pendingIntent.cancel()
             }
+
+            // Dismiss any active notification for this note to prevent orphaned notifications
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.cancel(noteId.toInt().coerceAtLeast(1001))
+
             Log.i(TAG, "Alarm cancelled for note $noteId")
             true
         } catch (e: Exception) {

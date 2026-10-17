@@ -28,4 +28,9 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    override fun onStart() {
+        super.onStart()
+        com.example.reminder.ReminderRinger.stopRinging()
+    }
 }

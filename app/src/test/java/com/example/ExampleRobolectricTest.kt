@@ -1,8 +1,10 @@
 package com.example
 
 import android.content.Context
+import android.content.Intent
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import java.util.Calendar
 import com.example.audio.AudioFileManager
 import com.example.data.AppDatabase
 import com.example.data.VoiceNoteDao
@@ -40,6 +42,7 @@ class ExampleRobolectricTest {
         database = Room.inMemoryDatabaseBuilder(context, AppDatabase::class.java)
             .allowMainThreadQueries()
             .build()
+        AppDatabase.setTestInstance(database)
         dao = database.voiceNoteDao()
         audioFileManager = AudioFileManager(context)
         repository = VoiceNoteRepositoryImpl(dao, audioFileManager)
@@ -47,6 +50,7 @@ class ExampleRobolectricTest {
 
     @After
     fun teardown() {
+        AppDatabase.setTestInstance(null)
         database.close()
     }
 
@@ -702,6 +706,144 @@ class ExampleRobolectricTest {
             targetTimestampMs = pastTime
         )
         assertFalse(success)
+    }
+
+    @Test
+    fun reminder_clockTimeParsingWithDotsAndRangeValidation() {
+        val reminderManager = com.example.reminder.ReminderManager(context)
+
+        // 1. Valid clock times with colon vs dot
+        val timeColon = reminderManager.parseExplicitTimestamp("remind me tomorrow at 8:52 PM")
+        val timeDot = reminderManager.parseExplicitTimestamp("remind me tomorrow at 8.52 PM")
+        assertNotNull(timeColon)
+        assertNotNull(timeDot)
+
+        val calColon = Calendar.getInstance().apply { timeInMillis = timeColon!! }
+        val calDot = Calendar.getInstance().apply { timeInMillis = timeDot!! }
+        assertEquals(20, calColon.get(Calendar.HOUR_OF_DAY))
+        assertEquals(52, calColon.get(Calendar.MINUTE))
+        assertEquals(20, calDot.get(Calendar.HOUR_OF_DAY))
+        assertEquals(52, calDot.get(Calendar.MINUTE))
+
+        // 2. AM clock time with dot
+        val timeAmDot = reminderManager.parseExplicitTimestamp("remind me tomorrow at 8.52 am to take medicine")
+        assertNotNull(timeAmDot)
+        val calAm = Calendar.getInstance().apply { timeInMillis = timeAmDot!! }
+        assertEquals(8, calAm.get(Calendar.HOUR_OF_DAY))
+        assertEquals(52, calAm.get(Calendar.MINUTE))
+
+        // 3. Bengali numerals with dot
+        val timeBanglaDot = reminderManager.parseExplicitTimestamp("কাল সকাল ৮.৫২ টায় ওষুধ খাওয়ার কথা মনে করিয়ে দিও")
+        assertNotNull(timeBanglaDot)
+        val calBangla = Calendar.getInstance().apply { timeInMillis = timeBanglaDot!! }
+        assertEquals(8, calBangla.get(Calendar.HOUR_OF_DAY))
+        assertEquals(52, calBangla.get(Calendar.MINUTE))
+
+        // 4. Boundary conditions: reject invalid hours or minutes (no silent rollover)
+        val invalidMin1 = reminderManager.parseExplicitTimestamp("remind me at 8:75 PM")
+        assertNull(invalidMin1)
+
+        val invalidMin2 = reminderManager.parseExplicitTimestamp("remind me at 8.65 AM")
+        assertNull(invalidMin2)
+
+        val invalidHour1 = reminderManager.parseExplicitTimestamp("remind me at 14:30 PM")
+        assertNull(invalidHour1)
+
+        val invalidHour2 = reminderManager.parseExplicitTimestamp("remind me at 25.00 PM")
+        assertNull(invalidHour2)
+    }
+
+    @Test
+    fun reminder_deliveryRingingAndDoneActionFlow() = runBlocking {
+        val tempFile = File(context.filesDir, "reminder_flow.m4a")
+        tempFile.writeText("audio")
+        val note = repository.saveNote(title = "Dentist", file = tempFile, durationMs = 5000L)
+
+        val futureTime = System.currentTimeMillis() + 3600000L
+        repository.updateReminderDetails(
+            id = note.id,
+            timestamp = futureTime,
+            task = "Dentist appointment",
+            isEnabled = true,
+            status = "SCHEDULED"
+        )
+
+        val receiver = com.example.reminder.ReminderBroadcastReceiver()
+
+        // 1. Simulate alarm firing
+        val alarmIntent = Intent().apply {
+            action = com.example.reminder.ReminderBroadcastReceiver.ACTION_FIRE_REMINDER
+            putExtra(com.example.reminder.ReminderBroadcastReceiver.EXTRA_NOTE_ID, note.id)
+            putExtra(com.example.reminder.ReminderBroadcastReceiver.EXTRA_NOTE_TITLE, "Dentist")
+            putExtra(com.example.reminder.ReminderBroadcastReceiver.EXTRA_REMINDER_TASK, "Dentist appointment")
+            putExtra(com.example.reminder.ReminderBroadcastReceiver.EXTRA_REMINDER_TEXT, "Scheduled reminder")
+        }
+        receiver.onReceive(context, alarmIntent)
+
+        // Ringing should start
+        assertTrue(com.example.reminder.ReminderRinger.isRingingActive)
+
+        // Database status MUST NOT be marked completed yet!
+        val noteAfterAlarm = repository.getNoteById(note.id)
+        assertNotNull(noteAfterAlarm)
+        assertEquals("SCHEDULED", noteAfterAlarm!!.reminderStatus)
+        assertTrue(noteAfterAlarm.isReminderEnabled)
+
+        // 2. Simulate user acknowledging via Done action
+        val doneIntent = Intent().apply {
+            action = com.example.reminder.ReminderBroadcastReceiver.ACTION_DONE
+            putExtra(com.example.reminder.ReminderBroadcastReceiver.EXTRA_NOTE_ID, note.id)
+        }
+        receiver.onReceive(context, doneIntent)
+
+        // Ringing should immediately stop
+        assertFalse(com.example.reminder.ReminderRinger.isRingingActive)
+
+        // Database status should be updated to COMPLETED and isReminderEnabled false
+        var noteAfterDone: VoiceNoteEntity? = null
+        for (i in 0 until 10) {
+            noteAfterDone = dao.getVoiceNoteById(note.id)
+            if (noteAfterDone?.reminderStatus == "COMPLETED") break
+            kotlinx.coroutines.delay(50)
+        }
+        assertNotNull(noteAfterDone)
+        assertEquals("COMPLETED", noteAfterDone!!.reminderStatus)
+        assertFalse(noteAfterDone.isReminderEnabled)
+    }
+
+    @Test
+    fun reminder_completionStatusOnlyWhenAcknowledged() = runBlocking {
+        val tempFile = File(context.filesDir, "ack_test.m4a")
+        tempFile.writeText("audio")
+        val note = repository.saveNote(title = "Flight Check-in", file = tempFile, durationMs = 5000L)
+
+        // Note with scheduled reminder
+        repository.updateReminderDetails(
+            id = note.id,
+            timestamp = System.currentTimeMillis() - 1000L, // time passed
+            task = "Check in online",
+            isEnabled = true,
+            status = "SCHEDULED"
+        )
+
+        // Status remains SCHEDULED even though time is past, until user acknowledges
+        var current = repository.getNoteById(note.id)
+        assertNotNull(current)
+        assertEquals("SCHEDULED", current!!.reminderStatus)
+
+        // User marks done
+        repository.updateReminderDetails(
+            id = note.id,
+            timestamp = current.reminderTimestamp,
+            task = current.reminderTask,
+            isEnabled = false,
+            status = "COMPLETED"
+        )
+
+        current = repository.getNoteById(note.id)
+        assertNotNull(current)
+        assertEquals("COMPLETED", current!!.reminderStatus)
+        assertFalse(current.isReminderEnabled)
     }
 }
 
