@@ -70,6 +70,7 @@ import com.example.ui.components.GeminiTranscribeDialog
 import com.example.ui.components.NoteItemCard
 import com.example.ui.components.PermissionRationaleCard
 import com.example.ui.components.RecordingBottomBar
+import com.example.ui.components.ReminderEditorDialog
 import com.example.ui.components.SaveNoteDialog
 import com.example.ui.components.SettingsDialog
 import com.example.ui.components.TranscribeDialog
@@ -349,7 +350,8 @@ fun VoiceNotebookScreen(
                             onEditTitle = { viewModel.promptEditTitle(note) },
                             onDelete = { viewModel.promptDeleteNote(note) },
                             onTranscribe = { viewModel.promptTranscribe(note) },
-                            onAiTranscribe = { viewModel.promptAiTranscribe(note) }
+                            onAiTranscribe = { viewModel.promptAiTranscribe(note) },
+                            onEditReminder = { viewModel.promptEditReminder(note) }
                         )
                     }
                 }

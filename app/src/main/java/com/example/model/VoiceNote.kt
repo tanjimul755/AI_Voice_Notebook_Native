@@ -14,5 +14,8 @@ data class VoiceNote(
     val transcription: String? = null,
     val tags: String = "",
     val isStarred: Boolean = false,
-    val reminderTimestamp: Long? = null
+    val reminderTimestamp: Long? = null,
+    val reminderTask: String? = null,
+    val isReminderEnabled: Boolean = false,
+    val reminderStatus: String = "NONE" // NONE, UNSCHEDULED, SCHEDULED, COMPLETED, CANCELLED
 )

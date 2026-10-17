@@ -51,4 +51,19 @@ interface VoiceNoteDao {
 
     @Query("UPDATE voice_notes SET reminderTimestamp = :reminderTimestamp WHERE id = :id")
     suspend fun updateReminder(id: Long, reminderTimestamp: Long?)
+
+    @Query("UPDATE voice_notes SET reminderTimestamp = :timestamp, reminderTask = :task, isReminderEnabled = :isEnabled, reminderStatus = :status WHERE id = :id")
+    suspend fun updateReminderDetails(
+        id: Long,
+        timestamp: Long?,
+        task: String?,
+        isEnabled: Boolean,
+        status: String
+    )
+
+    @Query("SELECT * FROM voice_notes WHERE isReminderEnabled = 1 AND reminderTimestamp IS NOT NULL AND reminderTimestamp > :currentTime")
+    suspend fun getActiveFutureReminders(currentTime: Long): List<VoiceNoteEntity>
+
+    @Query("SELECT * FROM voice_notes WHERE (reminderTask LIKE '%' || :query || '%' OR title LIKE '%' || :query || '%') AND isReminderEnabled = 1 LIMIT 1")
+    suspend fun findActiveReminderByQuery(query: String): VoiceNoteEntity?
 }

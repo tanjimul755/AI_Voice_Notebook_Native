@@ -24,6 +24,15 @@ interface VoiceNoteRepository {
     suspend fun updateNoteTitle(id: Long, newTitle: String)
     suspend fun updateTranscription(id: Long, transcription: String)
     suspend fun updateReminder(id: Long, reminderTimestamp: Long?)
+    suspend fun updateReminderDetails(
+        id: Long,
+        timestamp: Long?,
+        task: String?,
+        isEnabled: Boolean,
+        status: String
+    )
+    suspend fun getActiveFutureReminders(currentTime: Long): List<VoiceNote>
+    suspend fun findActiveReminderByQuery(query: String): VoiceNote?
     suspend fun toggleStarred(id: Long)
     suspend fun deleteNote(note: VoiceNote): Boolean
 }
@@ -83,6 +92,24 @@ class VoiceNoteRepositoryImpl(
 
     override suspend fun updateReminder(id: Long, reminderTimestamp: Long?) {
         dao.updateReminder(id, reminderTimestamp)
+    }
+
+    override suspend fun updateReminderDetails(
+        id: Long,
+        timestamp: Long?,
+        task: String?,
+        isEnabled: Boolean,
+        status: String
+    ) {
+        dao.updateReminderDetails(id, timestamp, task, isEnabled, status)
+    }
+
+    override suspend fun getActiveFutureReminders(currentTime: Long): List<VoiceNote> {
+        return dao.getActiveFutureReminders(currentTime).map { it.toDomain() }
+    }
+
+    override suspend fun findActiveReminderByQuery(query: String): VoiceNote? {
+        return dao.findActiveReminderByQuery(query)?.toDomain()
     }
 
     override suspend fun toggleStarred(id: Long) {

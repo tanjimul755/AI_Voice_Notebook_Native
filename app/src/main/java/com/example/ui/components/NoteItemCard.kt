@@ -20,6 +20,10 @@ import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.foundation.clickable
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.NotificationsActive
+import androidx.compose.material.icons.filled.NotificationsNone
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PlayArrow
@@ -81,6 +85,7 @@ fun NoteItemCard(
     onDelete: () -> Unit,
     onTranscribe: () -> Unit = {},
     onAiTranscribe: () -> Unit = {},
+    onEditReminder: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -155,6 +160,23 @@ fun NoteItemCard(
                     modifier = Modifier.weight(1f)
                 )
 
+                val hasReminder = note.reminderTimestamp != null || !note.reminderTask.isNullOrBlank() || note.reminderStatus != "NONE"
+                if (hasReminder) {
+                    IconButton(
+                        onClick = onEditReminder,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("reminder_bell_button_${note.id}")
+                    ) {
+                        Icon(
+                            imageVector = if (note.isReminderEnabled) Icons.Default.NotificationsActive else Icons.Default.NotificationsNone,
+                            contentDescription = if (note.isReminderEnabled) "Active reminder. Tap to edit." else "Disabled reminder. Tap to edit.",
+                            tint = if (note.isReminderEnabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+
                 IconButton(
                     onClick = onToggleStar,
                     modifier = Modifier
@@ -185,6 +207,22 @@ fun NoteItemCard(
                         expanded = showMenu,
                         onDismissRequest = { showMenu = false }
                     ) {
+                        DropdownMenuItem(
+                            text = { Text(if (hasReminder) "Edit Reminder" else "Set Reminder") },
+                            leadingIcon = {
+                                Icon(
+                                    Icons.Default.Notifications,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            },
+                            onClick = {
+                                showMenu = false
+                                onEditReminder()
+                            },
+                            modifier = Modifier.testTag("reminder_menu_item_${note.id}")
+                        )
                         DropdownMenuItem(
                             text = { Text("Transcribe with AI (Gemini)") },
                             leadingIcon = {
@@ -283,27 +321,47 @@ fun NoteItemCard(
                     }
                 }
 
-                if (note.reminderTimestamp != null) {
+                if (note.reminderTimestamp != null || !note.reminderTask.isNullOrBlank()) {
+                    val reminderLabel = when {
+                        note.reminderTimestamp != null -> {
+                            val timeStr = AudioFileManager.formatTimestamp(note.reminderTimestamp)
+                            if (!note.reminderTask.isNullOrBlank()) "${note.reminderTask}: $timeStr" else "Reminder: $timeStr"
+                        }
+                        !note.reminderTask.isNullOrBlank() -> "${note.reminderTask} (Unscheduled)"
+                        else -> "Reminder"
+                    }
+                    val containerColor = if (note.isReminderEnabled) {
+                        MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f)
+                    } else {
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.85f)
+                    }
+                    val contentColor = if (note.isReminderEnabled) {
+                        MaterialTheme.colorScheme.onTertiaryContainer
+                    } else {
+                        MaterialTheme.colorScheme.onSurfaceVariant
+                    }
                     Surface(
                         shape = RoundedCornerShape(6.dp),
-                        color = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.85f),
-                        modifier = Modifier.testTag("reminder_chip_${note.id}")
+                        color = containerColor,
+                        modifier = Modifier
+                            .testTag("reminder_chip_${note.id}")
+                            .clickable { onEditReminder() }
                     ) {
                         Row(
                             modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                imageVector = Icons.Default.Alarm,
+                                imageVector = if (note.isReminderEnabled) Icons.Default.Alarm else Icons.Default.NotificationsNone,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                tint = contentColor,
                                 modifier = Modifier.size(12.dp)
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                             Text(
-                                text = "Reminder: ${AudioFileManager.formatTimestamp(note.reminderTimestamp)}",
+                                text = reminderLabel,
                                 style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
+                                color = contentColor
                             )
                         }
                     }

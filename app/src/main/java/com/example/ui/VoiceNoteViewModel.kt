@@ -14,6 +14,7 @@ import com.example.data.NotebookSettings
 import com.example.data.VoiceNoteRepository
 import com.example.data.VoiceNoteRepositoryImpl
 import com.example.model.VoiceNote
+import com.example.reminder.ReminderAction
 import com.example.reminder.ReminderManager
 import com.example.transcription.AudioTranscriber
 import com.example.transcription.GeminiAudioTranscriber
@@ -72,6 +73,7 @@ data class NotebookUiState(
     val modelDownloadProgress: Float? = null,
     val aiTranscribingNoteId: Long? = null,
     val activeAiTranscribeDialogNote: VoiceNote? = null,
+    val activeReminderDialogNote: VoiceNote? = null,
     val isGeminiApiKeyConfigured: Boolean = false,
     val isSettingsDialogVisible: Boolean = false,
     val newlyCreatedNoteId: Long? = null,
@@ -94,6 +96,7 @@ private data class DialogsAndMessages(
     val modelDownloadProgress: Float? = null,
     val aiTranscribingNoteId: Long? = null,
     val activeAiTranscribeDialogNote: VoiceNote? = null,
+    val activeReminderDialogNote: VoiceNote? = null,
     val isSettingsDialogVisible: Boolean = false,
     val newlyCreatedNoteId: Long? = null,
     val settings: NotebookSettings = NotebookSettings()
@@ -172,6 +175,7 @@ class VoiceNoteViewModel(
             modelDownloadProgress = dm.modelDownloadProgress,
             aiTranscribingNoteId = dm.aiTranscribingNoteId,
             activeAiTranscribeDialogNote = dm.activeAiTranscribeDialogNote,
+            activeReminderDialogNote = dm.activeReminderDialogNote,
             isGeminiApiKeyConfigured = geminiTranscriber.isApiKeyConfigured(),
             isSettingsDialogVisible = dm.isSettingsDialogVisible,
             newlyCreatedNoteId = dm.newlyCreatedNoteId,
@@ -563,6 +567,71 @@ class VoiceNoteViewModel(
         notebookPreferences.setAutoReminderScheduling(enabled)
     }
 
+    // --- Reminder Actions ---
+
+    fun promptEditReminder(note: VoiceNote) {
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(activeReminderDialogNote = note)
+    }
+
+    fun dismissReminderDialog() {
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(activeReminderDialogNote = null)
+    }
+
+    fun saveReminderDetails(note: VoiceNote, task: String, timestampMs: Long?, isEnabled: Boolean) {
+        viewModelScope.launch {
+            if (isEnabled && timestampMs != null && timestampMs > System.currentTimeMillis()) {
+                val scheduled = reminderManager.scheduleAlarm(
+                    noteId = note.id,
+                    title = task.ifBlank { note.title },
+                    text = note.transcription ?: "Voice note reminder",
+                    targetTimestampMs = timestampMs
+                )
+                repository.updateReminderDetails(
+                    id = note.id,
+                    timestamp = timestampMs,
+                    task = task.ifBlank { note.title },
+                    isEnabled = true,
+                    status = "SCHEDULED"
+                )
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    activeReminderDialogNote = null,
+                    infoMessage = if (scheduled) "Reminder scheduled for ${AudioFileManager.formatTimestamp(timestampMs)}" else "Reminder saved"
+                )
+            } else {
+                reminderManager.cancelAlarm(note.id)
+                val status = if (timestampMs != null && timestampMs <= System.currentTimeMillis()) {
+                    "COMPLETED"
+                } else if (isEnabled && timestampMs == null) {
+                    "UNSCHEDULED"
+                } else {
+                    "CANCELLED"
+                }
+                repository.updateReminderDetails(
+                    id = note.id,
+                    timestamp = timestampMs,
+                    task = task.ifBlank { note.title },
+                    isEnabled = false,
+                    status = status
+                )
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    activeReminderDialogNote = null,
+                    infoMessage = if (!isEnabled) "Reminder disabled." else "Reminder updated."
+                )
+            }
+        }
+    }
+
+    fun deleteReminder(note: VoiceNote) {
+        viewModelScope.launch {
+            reminderManager.cancelAlarm(note.id)
+            repository.updateReminderDetails(note.id, null, null, false, "NONE")
+            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                activeReminderDialogNote = null,
+                infoMessage = "Reminder removed."
+            )
+        }
+    }
+
     // --- Automatic Transcription Orchestration ---
 
     /**
@@ -715,23 +784,93 @@ class VoiceNoteViewModel(
         // 2. Reminder Detection & Scheduling
         if (currentSettings.autoReminderDetection) {
             val reminder = reminderManager.detectReminder(transcript)
-            if (reminder != null) {
-                if (currentSettings.autoReminderScheduling && reminder.targetTimestampMs != null) {
-                    val updatedNote = note.copy(transcription = transcript)
-                    val scheduled = reminderManager.scheduleAlarm(updatedNote, reminder.targetTimestampMs)
-                    if (scheduled) {
-                        repository.updateReminder(note.id, reminder.targetTimestampMs)
+            if (reminder != null && reminder.action != ReminderAction.IGNORE) {
+                when (reminder.action) {
+                    ReminderAction.CANCEL -> {
+                        val targetNote = reminder.targetQuery?.let { query ->
+                            repository.findActiveReminderByQuery(query)
+                        } ?: note
+                        reminderManager.cancelAlarm(targetNote.id)
+                        repository.updateReminderDetails(
+                            id = targetNote.id,
+                            timestamp = targetNote.reminderTimestamp,
+                            task = targetNote.reminderTask,
+                            isEnabled = false,
+                            status = "CANCELLED"
+                        )
                         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                            infoMessage = "Reminder scheduled for ${AudioFileManager.formatTimestamp(reminder.targetTimestampMs)}"
+                            infoMessage = "Reminder cancelled for \"${targetNote.reminderTask ?: targetNote.title}\""
                         )
                     }
-                } else {
-                    if (reminder.targetTimestampMs != null) {
-                        repository.updateReminder(note.id, reminder.targetTimestampMs)
+                    ReminderAction.UPDATE -> {
+                        val targetNote = reminder.targetQuery?.let { query ->
+                            repository.findActiveReminderByQuery(query)
+                        } ?: note
+                        if (reminder.targetTimestampMs != null && reminder.targetTimestampMs > System.currentTimeMillis()) {
+                            reminderManager.scheduleAlarm(
+                                noteId = targetNote.id,
+                                title = targetNote.reminderTask ?: targetNote.title,
+                                text = targetNote.transcription ?: "Voice note reminder",
+                                targetTimestampMs = reminder.targetTimestampMs
+                            )
+                            repository.updateReminderDetails(
+                                id = targetNote.id,
+                                timestamp = reminder.targetTimestampMs,
+                                task = targetNote.reminderTask,
+                                isEnabled = true,
+                                status = "SCHEDULED"
+                            )
+                            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                infoMessage = "Reminder rescheduled for ${AudioFileManager.formatTimestamp(reminder.targetTimestampMs)}"
+                            )
+                        }
                     }
-                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                        infoMessage = "Reminder detected: ${reminder.taskSummary}"
-                    )
+                    ReminderAction.CREATE -> {
+                        if (reminder.targetTimestampMs != null) {
+                            if (currentSettings.autoReminderScheduling && reminder.targetTimestampMs > System.currentTimeMillis()) {
+                                val scheduled = reminderManager.scheduleAlarm(
+                                    noteId = note.id,
+                                    title = reminder.taskSummary,
+                                    text = transcript,
+                                    targetTimestampMs = reminder.targetTimestampMs
+                                )
+                                repository.updateReminderDetails(
+                                    id = note.id,
+                                    timestamp = reminder.targetTimestampMs,
+                                    task = reminder.taskSummary,
+                                    isEnabled = true,
+                                    status = "SCHEDULED"
+                                )
+                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                    infoMessage = if (scheduled) "Reminder scheduled for ${AudioFileManager.formatTimestamp(reminder.targetTimestampMs)}" else "Reminder detected: ${reminder.taskSummary}"
+                                )
+                            } else {
+                                repository.updateReminderDetails(
+                                    id = note.id,
+                                    timestamp = reminder.targetTimestampMs,
+                                    task = reminder.taskSummary,
+                                    isEnabled = false,
+                                    status = "UNSCHEDULED"
+                                )
+                                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                    infoMessage = "Reminder detected: ${reminder.taskSummary} (Tap bell to schedule)"
+                                )
+                            }
+                        } else {
+                            // Date/time missing or ambiguous: preserve reminder intent without scheduling
+                            repository.updateReminderDetails(
+                                id = note.id,
+                                timestamp = null,
+                                task = reminder.taskSummary,
+                                isEnabled = false,
+                                status = "UNSCHEDULED"
+                            )
+                            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                                infoMessage = "Reminder detected: ${reminder.taskSummary} (Tap bell to set time)"
+                            )
+                        }
+                    }
+                    else -> {}
                 }
             }
         }
