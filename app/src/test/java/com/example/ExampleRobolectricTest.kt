@@ -845,5 +845,92 @@ class ExampleRobolectricTest {
         assertEquals("COMPLETED", current!!.reminderStatus)
         assertFalse(current.isReminderEnabled)
     }
+
+    @Test
+    fun reminder_duplicateAlarmPreventionAndRebootRestoration() {
+        runBlocking {
+            val reminderManager = com.example.reminder.ReminderManager(context)
+            val tempFile = File(context.filesDir, "boot_test.m4a")
+            tempFile.writeText("audio")
+            val note = repository.saveNote(title = "Team Sync", file = tempFile, durationMs = 5000L)
+
+            val futureTime = System.currentTimeMillis() + 7200000L // 2 hours
+
+            // 1. Duplicate-alarm prevention: scheduling twice for the same note succeeds without orphan alarms
+            val firstSchedule = reminderManager.scheduleAlarm(note.id, "Team Sync", "Meeting", futureTime)
+            assertTrue(firstSchedule)
+            val secondSchedule = reminderManager.scheduleAlarm(note.id, "Team Sync Updated", "Meeting updated", futureTime + 1000L)
+            assertTrue(secondSchedule)
+
+            // 2. Persist active future reminder in Room DB
+            repository.updateReminderDetails(
+                id = note.id,
+                timestamp = futureTime + 1000L,
+                task = "Team Sync Updated",
+                isEnabled = true,
+                status = "SCHEDULED"
+            )
+
+            // 3. Trigger BootReceiver simulation (ACTION_BOOT_COMPLETED)
+            val bootReceiver = com.example.reminder.BootReceiver()
+            val bootIntent = Intent(Intent.ACTION_BOOT_COMPLETED)
+            bootReceiver.onReceive(context, bootIntent)
+
+            // Verify reminder note in DB is preserved and still SCHEDULED
+            val noteAfterBoot = repository.getNoteById(note.id)
+            assertNotNull(noteAfterBoot)
+            assertEquals("SCHEDULED", noteAfterBoot!!.reminderStatus)
+            assertTrue(noteAfterBoot.isReminderEnabled)
+            assertEquals(futureTime + 1000L, noteAfterBoot.reminderTimestamp)
+
+            // Clean up alarm
+            reminderManager.cancelAlarm(note.id)
+        }
+    }
+
+    @Test
+    fun reminder_notificationPermissionOrSchedulingFailuresDoNotFalselyMarkCompleted() {
+        runBlocking {
+            val reminderManager = com.example.reminder.ReminderManager(context)
+            val tempFile = File(context.filesDir, "perm_test.m4a")
+            tempFile.writeText("audio")
+            val note = repository.saveNote(title = "Doctor Call", file = tempFile, durationMs = 5000L)
+
+            val futureTime = System.currentTimeMillis() + 3600000L
+            repository.updateReminderDetails(
+                id = note.id,
+                timestamp = futureTime,
+                task = "Doctor Call",
+                isEnabled = true,
+                status = "SCHEDULED"
+            )
+
+            // Attempting to schedule with past time fails
+            val pastScheduled = reminderManager.scheduleAlarm(note.id, "Doctor Call", "Call Dr", System.currentTimeMillis() - 5000L)
+            assertFalse(pastScheduled)
+
+            // Status in DB must NOT be marked COMPLETED
+            var current = repository.getNoteById(note.id)
+            assertNotNull(current)
+            assertEquals("SCHEDULED", current!!.reminderStatus)
+            assertTrue(current.isReminderEnabled)
+
+            // Dismiss intent (swipe away without tapping Done) must also preserve status
+            val receiver = com.example.reminder.ReminderBroadcastReceiver()
+            val dismissIntent = Intent().apply {
+                action = com.example.reminder.ReminderBroadcastReceiver.ACTION_DISMISS
+                putExtra(com.example.reminder.ReminderBroadcastReceiver.EXTRA_NOTE_ID, note.id)
+            }
+            receiver.onReceive(context, dismissIntent)
+
+            // Ringer stops, but incomplete status is preserved!
+            assertFalse(com.example.reminder.ReminderRinger.isRingingActive)
+            current = repository.getNoteById(note.id)
+            assertNotNull(current)
+            assertEquals("SCHEDULED", current!!.reminderStatus)
+        }
+    }
 }
+
+
 

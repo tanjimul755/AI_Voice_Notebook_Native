@@ -33,4 +33,11 @@ class MainActivity : ComponentActivity() {
         super.onStart()
         com.example.reminder.ReminderRinger.stopRinging()
     }
+
+    override fun onNewIntent(intent: android.content.Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        com.example.reminder.ReminderRinger.stopRinging()
+    }
 }
+
