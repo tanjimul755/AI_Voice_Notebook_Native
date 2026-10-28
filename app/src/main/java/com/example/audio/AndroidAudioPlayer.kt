@@ -56,14 +56,34 @@ class AndroidAudioPlayer(
 
             onCompletionCallback = onCompletion
 
+            // Ensure system media volume is audible
+            try {
+                val audioManager = context.getSystemService(android.media.AudioManager::class.java)
+                    ?: (context.getSystemService(Context.AUDIO_SERVICE) as? android.media.AudioManager)
+                audioManager?.let { am ->
+                    val currentVol = am.getStreamVolume(android.media.AudioManager.STREAM_MUSIC)
+                    val maxVol = am.getStreamMaxVolume(android.media.AudioManager.STREAM_MUSIC)
+                    if (currentVol == 0 && maxVol > 0) {
+                        am.setStreamVolume(
+                            android.media.AudioManager.STREAM_MUSIC,
+                            (maxVol * 0.8).toInt().coerceAtLeast(1),
+                            0
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Could not check or adjust media volume", e)
+            }
+
             player = MediaPlayer().apply {
-                setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .setUsage(AudioAttributes.USAGE_MEDIA)
-                        .build()
-                )
+                val attributes = AudioAttributes.Builder()
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setLegacyStreamType(android.media.AudioManager.STREAM_MUSIC)
+                    .build()
+                setAudioAttributes(attributes)
                 setDataSource(file.absolutePath)
+                setVolume(1.0f, 1.0f)
                 setOnCompletionListener {
                     stop()
                     onCompletionCallback?.invoke()

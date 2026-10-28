@@ -7,6 +7,10 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+import com.example.ai.model.AiProviderType
+import com.example.ai.model.AiTask
+import com.example.ai.model.TaskAiConfig
+
 /**
  * Supported automatic transcription modes for AI Voice Notebook.
  */
@@ -39,7 +43,11 @@ data class NotebookSettings(
     val cloudAiEnabled: Boolean = true,
     val defaultTranscriptionFormat: GeminiTranscriptionFormat = GeminiTranscriptionFormat.AUTO,
     val autoReminderDetection: Boolean = true,
-    val autoReminderScheduling: Boolean = true
+    val autoReminderScheduling: Boolean = true,
+    val fullAiMode: Boolean = true,
+    val transcriptionAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.TRANSCRIPTION),
+    val reminderAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.REMINDER_INTERPRETATION),
+    val formattingAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.TRANSCRIPT_FORMATTING)
 )
 
 /**
@@ -80,6 +88,8 @@ class NotebookPreferences(context: Context) {
             true
         }
 
+        val fullAi = prefs.getBoolean(KEY_FULL_AI_MODE, true)
+
         return NotebookSettings(
             autoTitleGeneration = prefs.getBoolean(KEY_AUTO_TITLE, true),
             autoTranscription = prefs.getBoolean(KEY_AUTO_TRANSCRIBE, true),
@@ -88,8 +98,55 @@ class NotebookPreferences(context: Context) {
             cloudAiEnabled = prefs.getBoolean(KEY_CLOUD_AI_ENABLED, true),
             defaultTranscriptionFormat = format,
             autoReminderDetection = prefs.getBoolean(KEY_AUTO_REMINDER_DETECTION, true),
-            autoReminderScheduling = autoScheduling
+            autoReminderScheduling = autoScheduling,
+            fullAiMode = fullAi,
+            transcriptionAiConfig = loadTaskConfig(AiTask.TRANSCRIPTION),
+            reminderAiConfig = loadTaskConfig(AiTask.REMINDER_INTERPRETATION),
+            formattingAiConfig = loadTaskConfig(AiTask.TRANSCRIPT_FORMATTING)
         )
+    }
+
+    private fun loadTaskConfig(task: AiTask): TaskAiConfig {
+        val prefix = "task_${task.id}"
+        val enabled = prefs.getBoolean("${prefix}_enabled", true)
+        val providerId = prefs.getString("${prefix}_provider", AiProviderType.GEMINI.id) ?: AiProviderType.GEMINI.id
+        val provider = AiProviderType.values().find { it.id == providerId } ?: AiProviderType.GEMINI
+        val rawModel = prefs.getString("${prefix}_model", null)
+        val model = if (provider == AiProviderType.GEMINI && (rawModel == "gemini-3.8-flash" || rawModel == "gemini-2.5-flash" || rawModel.isNullOrBlank())) {
+            TaskAiConfig.getDefaultModel(task, provider)
+        } else {
+            rawModel ?: TaskAiConfig.getDefaultModel(task, provider)
+        }
+        val endpoint = prefs.getString("${prefix}_endpoint", "") ?: ""
+
+        return TaskAiConfig(
+            task = task,
+            enabled = enabled,
+            provider = provider,
+            model = model,
+            customEndpoint = endpoint
+        )
+    }
+
+    fun setTaskConfig(config: TaskAiConfig) {
+        val prefix = "task_${config.task.id}"
+        prefs.edit()
+            .putBoolean("${prefix}_enabled", config.enabled)
+            .putString("${prefix}_provider", config.provider.id)
+            .putString("${prefix}_model", config.model)
+            .putString("${prefix}_endpoint", config.customEndpoint)
+            .apply()
+
+        _settings.value = when (config.task) {
+            AiTask.TRANSCRIPTION -> _settings.value.copy(transcriptionAiConfig = config)
+            AiTask.REMINDER_INTERPRETATION -> _settings.value.copy(reminderAiConfig = config)
+            AiTask.TRANSCRIPT_FORMATTING -> _settings.value.copy(formattingAiConfig = config)
+        }
+    }
+
+    fun setFullAiMode(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_FULL_AI_MODE, enabled).apply()
+        _settings.value = _settings.value.copy(fullAiMode = enabled)
     }
 
     fun setTranscriptionMode(mode: TranscriptionMode) {
@@ -142,5 +199,6 @@ class NotebookPreferences(context: Context) {
         private const val KEY_DEFAULT_FORMAT = "pref_default_format"
         private const val KEY_AUTO_REMINDER_DETECTION = "pref_auto_reminder_detection"
         private const val KEY_AUTO_REMINDER_SCHEDULING = "pref_auto_reminder_scheduling"
+        private const val KEY_FULL_AI_MODE = "pref_full_ai_mode"
     }
 }

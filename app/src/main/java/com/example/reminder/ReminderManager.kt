@@ -96,9 +96,12 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
                 // Fired scheduled alarm
                 Log.i(TAG, "Reminder alarm triggered for note ID: $noteId")
 
-                // Verify notification permission before attempting notification delivery
+                // 1. Immediately start audible ringing alert (plays on alarm stream even in background)
+                ReminderRinger.startRinging(context, durationMs = 30_000L)
+
+                // 2. Verify notification permission before attempting notification delivery
                 if (!NotificationManagerCompat.from(context).areNotificationsEnabled()) {
-                    Log.w(TAG, "Notification permission is disabled; cannot post reminder notification")
+                    Log.w(TAG, "Notification permission is disabled; audible alarm ringing active")
                     return
                 }
 
@@ -129,9 +132,6 @@ class ReminderBroadcastReceiver : BroadcastReceiver() {
                     }
                     notificationManager.createNotificationChannel(channel)
                 }
-
-                // 1. Start audible ringing alert with bounded duration (stops after 30 seconds automatically)
-                ReminderRinger.startRinging(context, durationMs = 30_000L)
 
                 // 2. Tapping notification opens MainActivity with target note ID
                 val tapIntent = Intent(context, MainActivity::class.java).apply {
@@ -542,9 +542,9 @@ class ReminderManager(private val context: Context) {
 
         val now = Calendar.getInstance()
 
-        // 1. Relative seconds: e.g. "after 10 seconds", "in 10 seconds", "10 seconds later", "10 second pore", "১০ সেকেন্ড পর"
+        // 1. Relative seconds: e.g. "after 10 seconds", "in 10 seconds", "10 seconds later", "10 second pore", "১০ সেকেন্ড পর", "10 seconds"
         val secMatcher = Pattern.compile(
-            "(?:after|in)\\s+(\\d+)\\s*(?:seconds?|secs?|second|sec)\\b|(\\d+)\\s*(?:seconds?|secs?|second|sec)\\s*(?:later|after|pore|por)\\b|(\\d+)\\s*(?:সেকেন্ড|সেঃ)\\s*(?:পর|পরে)",
+            "(?:after|in)\\s+(\\d+)\\s*(?:seconds?|secs?|second|sec)\\b|(\\d+)\\s*(?:seconds?|secs?|second|sec)\\s*(?:later|after|pore|por)?\\b|(\\d+)\\s*(?:সেকেন্ড|সেঃ)\\s*(?:পর|পরে)?",
             Pattern.CASE_INSENSITIVE
         ).matcher(text)
         if (secMatcher.find()) {

@@ -66,6 +66,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.example.ui.components.DeleteConfirmationDialog
 import com.example.ui.components.EditTitleDialog
+import com.example.ui.components.FormatTranscriptDialog
 import com.example.ui.components.GeminiTranscribeDialog
 import com.example.ui.components.NoteItemCard
 import com.example.ui.components.PermissionRationaleCard
@@ -92,6 +93,23 @@ fun VoiceNotebookScreen(
 
     var isSearchExpanded by remember { mutableStateOf(false) }
     var hasPermissionDenied by remember { mutableStateOf(false) }
+
+    // Launcher for POST_NOTIFICATIONS runtime permission on Android 13+
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { /* Handled gracefully */ }
+
+    LaunchedEffect(Unit) {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            val notifGranted = ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.POST_NOTIFICATIONS
+            ) == PackageManager.PERMISSION_GRANTED
+            if (!notifGranted) {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+    }
 
     // Launcher for RECORD_AUDIO runtime permission
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -344,13 +362,16 @@ fun VoiceNotebookScreen(
                             playbackDurationMs = if (isCurrent) uiState.playbackState.durationMs else note.durationMs,
                             isTranscribing = uiState.transcribingNoteId == note.id,
                             isAiTranscribing = uiState.aiTranscribingNoteId == note.id,
+                            transcriptionMode = uiState.settings.transcriptionMode,
+                            fullAiMode = uiState.settings.fullAiMode,
                             onTogglePlay = { viewModel.togglePlayNote(note) },
                             onSeek = { seekPos -> viewModel.seekPlayback(seekPos) },
                             onToggleStar = { viewModel.toggleStarred(note) },
                             onEditTitle = { viewModel.promptEditTitle(note) },
                             onDelete = { viewModel.promptDeleteNote(note) },
-                            onTranscribe = { viewModel.promptTranscribe(note) },
-                            onAiTranscribe = { viewModel.promptAiTranscribe(note) },
+                            onTranscribe = { viewModel.startTranscribe(note) },
+                            onAiTranscribe = { viewModel.startAiTranscribe(note) },
+                            onFormatTranscript = { viewModel.promptFormatTranscript(note) },
                             onEditReminder = { viewModel.promptEditReminder(note) }
                         )
                     }
@@ -416,6 +437,16 @@ fun VoiceNotebookScreen(
         )
     }
 
+    // Format Transcript Dialog
+    uiState.activeFormatDialogNote?.let { note ->
+        FormatTranscriptDialog(
+            note = note,
+            initialFormat = uiState.settings.defaultTranscriptionFormat,
+            onConfirm = { format -> viewModel.formatNoteTranscript(note, format) },
+            onDismiss = { viewModel.dismissFormatTranscriptDialog() }
+        )
+    }
+
     // Voice Note Reminder Editor Dialog
     uiState.activeReminderDialogNote?.let { note ->
         ReminderEditorDialog(
@@ -438,6 +469,14 @@ fun VoiceNotebookScreen(
             settings = uiState.settings,
             isGeminiConfigured = uiState.isGeminiApiKeyConfigured,
             isWhisperModelAvailable = uiState.modelStatus?.isAvailable == true,
+            usageRecords = uiState.usageRecords,
+            getMaskedKey = { viewModel.getMaskedKey(it) },
+            onSaveApiKey = { provider, key -> viewModel.saveApiKey(provider, key) },
+            onRemoveApiKey = { provider -> viewModel.removeApiKey(provider) },
+            onTestConnection = { config, onResult -> viewModel.testAiConfig(config, onResult) },
+            onResetUsage = { viewModel.resetAiUsage() },
+            onFullAiModeChange = { viewModel.setFullAiMode(it) },
+            onTaskConfigChange = { viewModel.updateTaskAiConfig(it) },
             onTranscriptionModeChange = { viewModel.setTranscriptionMode(it) },
             onAutoTitleChange = { viewModel.setAutoTitleGeneration(it) },
             onAutoTranscribeChange = { viewModel.setAutoTranscription(it) },

@@ -67,6 +67,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.audio.AudioFileManager
+import com.example.data.TranscriptionMode
 import com.example.model.VoiceNote
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -85,6 +86,8 @@ fun NoteItemCard(
     playbackDurationMs: Long,
     isTranscribing: Boolean = false,
     isAiTranscribing: Boolean = false,
+    transcriptionMode: TranscriptionMode = TranscriptionMode.AUTO_SELECT,
+    fullAiMode: Boolean = true,
     onTogglePlay: () -> Unit,
     onSeek: (Long) -> Unit,
     onToggleStar: () -> Unit,
@@ -93,6 +96,7 @@ fun NoteItemCard(
     onTranscribe: () -> Unit = {},
     onAiTranscribe: () -> Unit = {},
     onEditReminder: () -> Unit = {},
+    onFormatTranscript: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
@@ -318,31 +322,53 @@ fun NoteItemCard(
                             },
                             modifier = Modifier.testTag("reminder_menu_item_${note.id}")
                         )
-                        DropdownMenuItem(
-                            text = { Text("Transcribe with AI (Gemini)") },
-                            leadingIcon = {
-                                Icon(
-                                    Icons.Default.AutoAwesome,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                            },
-                            onClick = {
-                                showMenu = false
-                                onAiTranscribe()
-                            },
-                            modifier = Modifier.testTag("ai_transcribe_menu_item_${note.id}")
-                        )
-                        DropdownMenuItem(
-                            text = { Text(if (note.transcription.isNullOrBlank()) "Transcribe (Offline Whisper)" else "Re-transcribe (Offline)") },
-                            leadingIcon = { Icon(Icons.Default.Subtitles, contentDescription = null, modifier = Modifier.size(20.dp)) },
-                            onClick = {
-                                showMenu = false
-                                onTranscribe()
-                            },
-                            modifier = Modifier.testTag("transcribe_menu_item_${note.id}")
-                        )
+                        if (transcriptionMode != TranscriptionMode.LOCAL_ONLY) {
+                            DropdownMenuItem(
+                                text = { Text("Transcribe with AI (Gemini)") },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    onAiTranscribe()
+                                },
+                                modifier = Modifier.testTag("ai_transcribe_menu_item_${note.id}")
+                            )
+                        }
+                        if (transcriptionMode != TranscriptionMode.CLOUD_ONLY) {
+                            DropdownMenuItem(
+                                text = { Text(if (note.transcription.isNullOrBlank()) "Transcribe (Offline Whisper)" else "Re-transcribe (Offline)") },
+                                leadingIcon = { Icon(Icons.Default.Subtitles, contentDescription = null, modifier = Modifier.size(20.dp)) },
+                                onClick = {
+                                    showMenu = false
+                                    onTranscribe()
+                                },
+                                modifier = Modifier.testTag("transcribe_menu_item_${note.id}")
+                            )
+                        }
+                        if (!note.transcription.isNullOrBlank()) {
+                            DropdownMenuItem(
+                                text = { Text("Format Transcript (AI)") },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.AutoAwesome,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    onFormatTranscript()
+                                },
+                                modifier = Modifier.testTag("format_transcript_menu_item_${note.id}")
+                            )
+                        }
                         DropdownMenuItem(
                             text = { Text("Rename Note") },
                             leadingIcon = { Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(20.dp)) },
@@ -600,47 +626,56 @@ fun NoteItemCard(
                     }
                 }
             } else {
-                // If not transcribed yet, offer quick action
+                // If not transcribed yet, offer quick action strictly matching chosen mode
+                val showOffline = transcriptionMode == TranscriptionMode.LOCAL_ONLY ||
+                        (transcriptionMode == TranscriptionMode.AUTO_SELECT && !fullAiMode)
+                val showAi = transcriptionMode == TranscriptionMode.CLOUD_ONLY ||
+                        (transcriptionMode == TranscriptionMode.AUTO_SELECT && fullAiMode)
+
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    OutlinedButton(
-                        onClick = onTranscribe,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("transcribe_button_${note.id}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Subtitles,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Transcribe (Offline)",
-                            style = MaterialTheme.typography.labelMedium
-                        )
+                    if (showOffline) {
+                        OutlinedButton(
+                            onClick = onTranscribe,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("transcribe_button_${note.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Subtitles,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Transcribe (Offline)",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
                     }
 
-                    FilledTonalButton(
-                        onClick = onAiTranscribe,
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .testTag("ai_transcribe_button_${note.id}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.AutoAwesome,
-                            contentDescription = null,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text(
-                            text = "Transcribe with AI",
-                            style = MaterialTheme.typography.labelMedium
-                        )
+                    if (showAi) {
+                        FilledTonalButton(
+                            onClick = onAiTranscribe,
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("ai_transcribe_button_${note.id}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Transcribe with AI",
+                                style = MaterialTheme.typography.labelMedium
+                            )
+                        }
                     }
                 }
             }
