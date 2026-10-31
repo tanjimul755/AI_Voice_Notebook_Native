@@ -38,6 +38,45 @@ class AiUsageTracker(context: Context) {
             totalTokens = current.totalTokens + totalTokens
         )
         saveUsage(updated)
+
+        // Also track for default provider profile
+        recordProfileSuccess(
+            profileId = "default_${provider.id}",
+            task = task,
+            provider = provider,
+            promptTokens = promptTokens,
+            completionTokens = completionTokens,
+            totalTokens = totalTokens
+        )
+    }
+
+    @Synchronized
+    fun recordProfileSuccess(
+        profileId: String,
+        task: AiTask,
+        provider: AiProviderType,
+        promptTokens: Long = 0L,
+        completionTokens: Long = 0L,
+        totalTokens: Long = (promptTokens + completionTokens),
+        audioDurationMs: Long = 0L
+    ) {
+        val pKey = "profile_$profileId"
+        val curSuccess = prefs.getInt("${pKey}_success", 0)
+        val curTokens = prefs.getLong("${pKey}_tokens", 0L)
+        val curAudioMs = prefs.getLong("${pKey}_audio_ms", 0L)
+
+        val curPeriodRequests = prefs.getLong("${pKey}_period_requests", 0L)
+        val curPeriodTokens = prefs.getLong("${pKey}_period_tokens", 0L)
+        val curPeriodAudioMs = prefs.getLong("${pKey}_period_audio_ms", 0L)
+
+        prefs.edit()
+            .putInt("${pKey}_success", curSuccess + 1)
+            .putLong("${pKey}_tokens", curTokens + totalTokens)
+            .putLong("${pKey}_audio_ms", curAudioMs + audioDurationMs)
+            .putLong("${pKey}_period_requests", curPeriodRequests + 1)
+            .putLong("${pKey}_period_tokens", curPeriodTokens + totalTokens)
+            .putLong("${pKey}_period_audio_ms", curPeriodAudioMs + audioDurationMs)
+            .apply()
     }
 
     @Synchronized
@@ -53,6 +92,149 @@ class AiUsageTracker(context: Context) {
             current.copy(failureCount = current.failureCount + 1)
         }
         saveUsage(updated)
+
+        recordProfileFailure(
+            profileId = "default_${provider.id}",
+            task = task,
+            provider = provider,
+            isQuotaBlocked = isQuotaBlocked
+        )
+    }
+
+    @Synchronized
+    fun recordProfileFailure(
+        profileId: String,
+        task: AiTask,
+        provider: AiProviderType,
+        isQuotaBlocked: Boolean = false
+    ) {
+        val pKey = "profile_$profileId"
+        if (isQuotaBlocked) {
+            val curQuota = prefs.getInt("${pKey}_quota", 0)
+            val curPeriodQuota = prefs.getInt("${pKey}_period_quota_blocked", 0)
+            prefs.edit()
+                .putInt("${pKey}_quota", curQuota + 1)
+                .putInt("${pKey}_period_quota_blocked", curPeriodQuota + 1)
+                .apply()
+        } else {
+            val curFail = prefs.getInt("${pKey}_failure", 0)
+            val curPeriodFail = prefs.getInt("${pKey}_period_failure", 0)
+            prefs.edit()
+                .putInt("${pKey}_failure", curFail + 1)
+                .putInt("${pKey}_period_failure", curPeriodFail + 1)
+                .apply()
+        }
+    }
+
+    /**
+     * Calculates quota usage dashboard metrics for a given profile.
+     * Accurately distinguishes between configured limits and missing/unavailable quota.
+     */
+    fun getProfileQuotaStatus(profile: com.example.ai.model.ApiProfile): com.example.ai.model.ProfileQuotaStatus {
+        val pKey = "profile_${profile.id}"
+        val now = System.currentTimeMillis()
+
+        // Check reset period roll-over
+        checkAndResetPeriodIfNeeded(profile, now)
+
+        val successCount = prefs.getInt("${pKey}_success", 0)
+        val failureCount = prefs.getInt("${pKey}_failure", 0)
+        val quotaBlockedCount = prefs.getInt("${pKey}_period_quota_blocked", prefs.getInt("${pKey}_quota", 0))
+
+        val periodRequests = prefs.getLong("${pKey}_period_requests", 0L)
+        val periodTokens = prefs.getLong("${pKey}_period_tokens", 0L)
+        val periodAudioMs = prefs.getLong("${pKey}_period_audio_ms", 0L)
+
+        val unit = profile.quotaConfig.unit
+        val consumed = when (unit) {
+            com.example.ai.model.QuotaUnit.REQUESTS -> periodRequests
+            com.example.ai.model.QuotaUnit.TOKENS -> periodTokens
+            com.example.ai.model.QuotaUnit.AUDIO_MINUTES -> {
+                if (periodAudioMs <= 0L) 0L else (periodAudioMs / 60_000L).coerceAtLeast(1L)
+            }
+            com.example.ai.model.QuotaUnit.CREDITS -> periodRequests
+        }
+
+        val hasLimit = profile.quotaConfig.limit > 0L
+
+        return if (hasLimit) {
+            val limit = profile.quotaConfig.limit
+            val remaining = (limit - consumed).coerceAtLeast(0L)
+            val progress = (consumed.toFloat() / limit.toFloat()).coerceIn(0f, 1f)
+            val isExhausted = consumed >= limit || quotaBlockedCount > 0
+            val resetLabel = when (profile.quotaConfig.resetPeriod) {
+                com.example.ai.model.QuotaResetPeriod.DAILY -> "Resets daily"
+                com.example.ai.model.QuotaResetPeriod.MONTHLY -> "Resets monthly"
+                com.example.ai.model.QuotaResetPeriod.TOTAL -> "Total account limit"
+            }
+
+            com.example.ai.model.ProfileQuotaStatus(
+                profileId = profile.id,
+                profileName = profile.name,
+                provider = profile.provider,
+                consumed = consumed,
+                limit = limit,
+                remaining = remaining,
+                unit = unit,
+                resetInfo = resetLabel,
+                isEstimated = true,
+                isQuotaUnavailable = false,
+                isQuotaExhausted = isExhausted,
+                progress = progress,
+                successCount = successCount,
+                failureCount = failureCount,
+                quotaBlockedCount = quotaBlockedCount
+            )
+        } else {
+            // No quota data configured: clearly show unavailable, never invent percentage
+            val isExhausted = quotaBlockedCount > 0
+            val resetLabel = if (isExhausted) "Rate limit hit (429)" else "Quota unavailable"
+
+            com.example.ai.model.ProfileQuotaStatus(
+                profileId = profile.id,
+                profileName = profile.name,
+                provider = profile.provider,
+                consumed = consumed,
+                limit = null,
+                remaining = null,
+                unit = unit,
+                resetInfo = resetLabel,
+                isEstimated = false,
+                isQuotaUnavailable = true,
+                isQuotaExhausted = isExhausted,
+                progress = 0f,
+                successCount = successCount,
+                failureCount = failureCount,
+                quotaBlockedCount = quotaBlockedCount
+            )
+        }
+    }
+
+    private fun checkAndResetPeriodIfNeeded(profile: com.example.ai.model.ApiProfile, currentTimeMs: Long) {
+        val pKey = "profile_${profile.id}"
+        val periodStart = prefs.getLong("${pKey}_period_start", 0L)
+        if (periodStart == 0L) {
+            prefs.edit().putLong("${pKey}_period_start", currentTimeMs).apply()
+            return
+        }
+
+        val elapsed = currentTimeMs - periodStart
+        val shouldReset = when (profile.quotaConfig.resetPeriod) {
+            com.example.ai.model.QuotaResetPeriod.DAILY -> elapsed >= (24 * 60 * 60 * 1000L)
+            com.example.ai.model.QuotaResetPeriod.MONTHLY -> elapsed >= (30L * 24 * 60 * 60 * 1000L)
+            com.example.ai.model.QuotaResetPeriod.TOTAL -> false
+        }
+
+        if (shouldReset) {
+            prefs.edit()
+                .putLong("${pKey}_period_start", currentTimeMs)
+                .putLong("${pKey}_period_requests", 0L)
+                .putLong("${pKey}_period_tokens", 0L)
+                .putLong("${pKey}_period_audio_ms", 0L)
+                .putInt("${pKey}_period_quota_blocked", 0)
+                .putInt("${pKey}_period_failure", 0)
+                .apply()
+        }
     }
 
     fun getUsage(task: AiTask, provider: AiProviderType): AiUsageRecord {
@@ -93,6 +275,24 @@ class AiUsageTracker(context: Context) {
     fun resetAll() {
         prefs.edit().clear().apply()
         _usageFlow.value = loadAllUsage()
+    }
+
+    @Synchronized
+    fun resetProfileUsage(profileId: String) {
+        val pKey = "profile_$profileId"
+        prefs.edit()
+            .remove("${pKey}_success")
+            .remove("${pKey}_failure")
+            .remove("${pKey}_quota")
+            .remove("${pKey}_tokens")
+            .remove("${pKey}_audio_ms")
+            .remove("${pKey}_period_requests")
+            .remove("${pKey}_period_tokens")
+            .remove("${pKey}_period_audio_ms")
+            .remove("${pKey}_period_quota_blocked")
+            .remove("${pKey}_period_failure")
+            .remove("${pKey}_period_start")
+            .apply()
     }
 
     private fun saveUsage(record: AiUsageRecord) {

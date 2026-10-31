@@ -257,5 +257,175 @@ class MultiProviderAiTest {
         val showAiInAutoFull = (autoSelect == com.example.data.TranscriptionMode.CLOUD_ONLY || (autoSelect == com.example.data.TranscriptionMode.AUTO_SELECT && fullAi))
         assertTrue(showAiInAutoFull)
     }
+
+    @Test
+    fun flexibleApiProfiles_crudAndPersistence() {
+        val initialProfiles = preferences.getAllProfiles()
+        assertTrue("Should have default profiles", initialProfiles.isNotEmpty())
+
+        val newProfile = com.example.ai.model.ApiProfile(
+            id = "custom_openai_secondary",
+            name = "OpenAI Work Account",
+            provider = AiProviderType.OPENAI_COMPATIBLE,
+            model = "gpt-4o-mini",
+            customEndpoint = "https://custom.openai.proxy/v1",
+            quotaConfig = com.example.ai.model.ProfileQuotaConfig(
+                limit = 500,
+                unit = com.example.ai.model.QuotaUnit.REQUESTS,
+                resetPeriod = com.example.ai.model.QuotaResetPeriod.MONTHLY
+            )
+        )
+
+        // Save
+        preferences.saveProfile(newProfile)
+        val fetched = preferences.getProfile("custom_openai_secondary")
+        assertNotNull(fetched)
+        assertEquals("OpenAI Work Account", fetched?.name)
+        assertEquals("gpt-4o-mini", fetched?.model)
+        assertEquals("https://custom.openai.proxy/v1", fetched?.customEndpoint)
+        assertEquals(500L, fetched?.quotaConfig?.limit)
+
+        // Key storage for profile
+        keyStorage.saveProfileKey("custom_openai_secondary", "sk-work-1234567890abcdef")
+        assertTrue(keyStorage.hasProfileKey("custom_openai_secondary"))
+        assertEquals("sk-work-1234567890abcdef", keyStorage.getProfileKey("custom_openai_secondary", AiProviderType.OPENAI_COMPATIBLE))
+        assertTrue(keyStorage.getMaskedProfileKey("custom_openai_secondary", AiProviderType.OPENAI_COMPATIBLE).contains("••••"))
+
+        // Delete
+        preferences.deleteProfile("custom_openai_secondary")
+        keyStorage.removeProfileKey("custom_openai_secondary")
+        org.junit.Assert.assertNull(preferences.getProfile("custom_openai_secondary"))
+        assertFalse(keyStorage.hasProfileKey("custom_openai_secondary"))
+    }
+
+    @Test
+    fun quotaUsageDashboard_calculationAndUnavailableHandling() {
+        // 1. Profile with unconfigured quota limit (limit = 0)
+        val unconfiguredProfile = com.example.ai.model.ApiProfile(
+            id = "unlimited_profile",
+            name = "Pay-As-You-Go",
+            provider = AiProviderType.GEMINI,
+            quotaConfig = com.example.ai.model.ProfileQuotaConfig(limit = 0)
+        )
+        val unconfiguredStatus = usageTracker.getProfileQuotaStatus(unconfiguredProfile)
+        assertTrue(unconfiguredStatus.isQuotaUnavailable)
+        assertEquals(0f, unconfiguredStatus.progress, 0.001f)
+        assertFalse(unconfiguredStatus.isEstimated)
+
+        // 2. Profile with manual limit configured (e.g. 100 requests)
+        val limitedProfile = com.example.ai.model.ApiProfile(
+            id = "limited_profile",
+            name = "Free Tier Account",
+            provider = AiProviderType.GEMINI,
+            quotaConfig = com.example.ai.model.ProfileQuotaConfig(
+                hasManualLimit = true,
+                limit = 100L,
+                unit = com.example.ai.model.QuotaUnit.REQUESTS,
+                resetPeriod = com.example.ai.model.QuotaResetPeriod.DAILY
+            )
+        )
+
+        // Consume 25 requests
+        repeat(25) {
+            usageTracker.recordProfileSuccess(
+                profileId = "limited_profile",
+                task = AiTask.TRANSCRIPTION,
+                provider = AiProviderType.GEMINI,
+                promptTokens = 50L,
+                completionTokens = 20L
+            )
+        }
+
+        val activeStatus = usageTracker.getProfileQuotaStatus(limitedProfile)
+        assertFalse(activeStatus.isQuotaUnavailable)
+        assertEquals(25L, activeStatus.consumed)
+        assertEquals(100L, activeStatus.limit)
+        assertEquals(75L, activeStatus.remaining)
+        assertEquals(0.25f, activeStatus.progress, 0.01f)
+        assertTrue("Should be labeled as estimate", activeStatus.isEstimated)
+        assertEquals(0, activeStatus.quotaBlockedCount)
+
+        // 3. Record a 429 rate limit hit
+        usageTracker.recordProfileFailure(
+            profileId = "limited_profile",
+            task = AiTask.TRANSCRIPTION,
+            provider = AiProviderType.GEMINI,
+            isQuotaBlocked = true
+        )
+        val blockedStatus = usageTracker.getProfileQuotaStatus(limitedProfile)
+        assertEquals(1, blockedStatus.quotaBlockedCount)
+        assertTrue(blockedStatus.isQuotaExhausted)
+    }
+
+    @Test
+    fun intelligentTitleGeneration_bengaliMedicineAndActionExtraction() {
+        // User request sample: "আমাকে ১০ সেকেন্ড পর ওষুধ খাওয়ার কথা মনে করিয়ে দিও"
+        val bengaliPrompt = "আমাকে ১০ সেকেন্ড পর ওষুধ খাওয়ার কথা মনে করিয়ে দিও"
+        val extractedAction = com.example.util.TitleGenerator.extractActionTitle(bengaliPrompt)
+
+        // The reminder title must be "ওষুধ খাও", not the entire sentence or its first few words
+        assertEquals("ওষুধ খাও", extractedAction)
+
+        val fullGeneratedTitle = com.example.util.TitleGenerator.generateTitle(bengaliPrompt)
+        assertEquals("ওষুধ খাও", fullGeneratedTitle)
+
+        // Contextual app check test: "৫ সেকেন্ড পর এই অ্যাপ টা চেক করার কথা মনে করিয়ে দিও" -> "App টি চেক করো"
+        val appCheckPrompt = "৫ সেকেন্ড পর এই অ্যাপ টা চেক করার কথা মনে করিয়ে দিও"
+        val appCheckAction = com.example.util.TitleGenerator.extractActionTitle(appCheckPrompt)
+        assertEquals("App টি চেক করো", appCheckAction)
+        val appCheckTitle = com.example.util.TitleGenerator.generateTitle(appCheckPrompt)
+        assertEquals("App টি চেক করো", appCheckTitle)
+
+        // Humanization of verbal nouns into natural 2nd-person imperatives
+        assertEquals("App টি চেক করো", com.example.util.TitleGenerator.humanizeActionTitle("App চেক করা"))
+        assertEquals("App টি চেক করো", com.example.util.TitleGenerator.humanizeActionTitle("এই অ্যাপ টা চেক করা"))
+        assertEquals("App টি চেক করো", com.example.util.TitleGenerator.humanizeActionTitle("এই অ্যাপ টা চেক করো"))
+        assertEquals("ওষুধ খাও", com.example.util.TitleGenerator.humanizeActionTitle("ওষুধ খাওয়া"))
+
+        // Tight relative delay extraction (Bengali digits, Bengali words, English)
+        assertEquals(5L, com.example.reminder.ReminderManager.extractRelativeSeconds(appCheckPrompt))
+        assertEquals(10L, com.example.reminder.ReminderManager.extractRelativeSeconds(bengaliPrompt))
+        assertEquals(5L, com.example.reminder.ReminderManager.extractRelativeSeconds("please remind me after 5 seconds"))
+        assertEquals(5L, com.example.reminder.ReminderManager.extractRelativeSeconds("পাঁচ সেকেন্ড পর মনে করিয়ে দিও"))
+        assertEquals(300L, com.example.reminder.ReminderManager.extractRelativeSeconds("৫ মিনিট পর ওষুধ খাও"))
+
+        // English action extraction tests
+        val englishReminder = "Please remind me to take medicine after 10 seconds"
+        val englishAction = com.example.util.TitleGenerator.extractActionTitle(englishReminder)
+        assertEquals("Take medicine", englishAction)
+
+        val englishStove = "remind me in 20 seconds to turn off stove"
+        val stoveAction = com.example.util.TitleGenerator.extractActionTitle(englishStove)
+        assertEquals("Turn off stove", stoveAction)
+
+        // Ordinary note title generation (not a reminder, concise without filler words)
+        val noteContent = "আজকের মিটিংয়ের আলোচনা এবং আগামী সপ্তাহের কাজের পরিকল্পনা"
+        val noteTitle = com.example.util.TitleGenerator.extractNoteTitle(noteContent)
+        assertTrue("Title should be concise and natural", noteTitle.isNotBlank() && noteTitle.length <= 40)
+    }
+
+    @Test
+    fun multiProviderFallback_profileResolutionPriority() {
+        val profileA = com.example.ai.model.ApiProfile(id = "prof_a", name = "Primary Gemini", provider = AiProviderType.GEMINI)
+        val profileB = com.example.ai.model.ApiProfile(id = "prof_b", name = "Fallback Gemini 2", provider = AiProviderType.GEMINI)
+        val profileC = com.example.ai.model.ApiProfile(id = "prof_c", name = "Backup OpenAI", provider = AiProviderType.OPENAI_COMPATIBLE)
+
+        val allProfiles = listOf(profileA, profileB, profileC)
+        val taskConfig = TaskAiConfig(
+            task = AiTask.TRANSCRIPTION,
+            enabled = true,
+            preferredProfileId = "prof_a",
+            fallbackProfileIds = listOf("prof_c", "prof_b")
+        )
+
+        val resolved = aiManager.resolveCandidateProfiles(AiTask.TRANSCRIPTION, taskConfig, allProfiles)
+        assertEquals(3, resolved.size)
+        // 1st is preferred (prof_a)
+        assertEquals("prof_a", resolved[0].id)
+        // 2nd is first in fallback list (prof_c)
+        assertEquals("prof_c", resolved[1].id)
+        // 3rd is second in fallback list (prof_b)
+        assertEquals("prof_b", resolved[2].id)
+    }
 }
 

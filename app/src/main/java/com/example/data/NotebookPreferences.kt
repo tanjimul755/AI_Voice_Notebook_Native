@@ -9,7 +9,13 @@ import kotlinx.coroutines.flow.asStateFlow
 
 import com.example.ai.model.AiProviderType
 import com.example.ai.model.AiTask
+import com.example.ai.model.ApiProfile
+import com.example.ai.model.ProfileQuotaConfig
+import com.example.ai.model.QuotaResetPeriod
+import com.example.ai.model.QuotaUnit
 import com.example.ai.model.TaskAiConfig
+import org.json.JSONArray
+import org.json.JSONObject
 
 /**
  * Supported automatic transcription modes for AI Voice Notebook.
@@ -45,6 +51,7 @@ data class NotebookSettings(
     val autoReminderDetection: Boolean = true,
     val autoReminderScheduling: Boolean = true,
     val fullAiMode: Boolean = true,
+    val apiProfiles: List<ApiProfile> = emptyList(),
     val transcriptionAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.TRANSCRIPTION),
     val reminderAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.REMINDER_INTERPRETATION),
     val formattingAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.TRANSCRIPT_FORMATTING)
@@ -89,6 +96,7 @@ class NotebookPreferences(context: Context) {
         }
 
         val fullAi = prefs.getBoolean(KEY_FULL_AI_MODE, true)
+        val profiles = getAllProfiles()
 
         return NotebookSettings(
             autoTitleGeneration = prefs.getBoolean(KEY_AUTO_TITLE, true),
@@ -100,13 +108,159 @@ class NotebookPreferences(context: Context) {
             autoReminderDetection = prefs.getBoolean(KEY_AUTO_REMINDER_DETECTION, true),
             autoReminderScheduling = autoScheduling,
             fullAiMode = fullAi,
-            transcriptionAiConfig = loadTaskConfig(AiTask.TRANSCRIPTION),
-            reminderAiConfig = loadTaskConfig(AiTask.REMINDER_INTERPRETATION),
-            formattingAiConfig = loadTaskConfig(AiTask.TRANSCRIPT_FORMATTING)
+            apiProfiles = profiles,
+            transcriptionAiConfig = loadTaskConfig(AiTask.TRANSCRIPTION, profiles),
+            reminderAiConfig = loadTaskConfig(AiTask.REMINDER_INTERPRETATION, profiles),
+            formattingAiConfig = loadTaskConfig(AiTask.TRANSCRIPT_FORMATTING, profiles)
         )
     }
 
-    private fun loadTaskConfig(task: AiTask): TaskAiConfig {
+    fun getAllProfiles(): List<ApiProfile> {
+        val jsonString = prefs.getString(KEY_API_PROFILES, null)
+        if (jsonString.isNullOrBlank()) {
+            val defaults = createDefaultProfiles()
+            saveProfilesInternal(defaults)
+            return defaults
+        }
+        return try {
+            val array = JSONArray(jsonString)
+            val list = mutableListOf<ApiProfile>()
+            for (i in 0 until array.length()) {
+                val obj = array.getJSONObject(i)
+                val p = parseProfileJson(obj)
+                list.add(p)
+            }
+            if (list.isEmpty()) {
+                val defaults = createDefaultProfiles()
+                saveProfilesInternal(defaults)
+                defaults
+            } else {
+                list
+            }
+        } catch (e: Exception) {
+            val defaults = createDefaultProfiles()
+            saveProfilesInternal(defaults)
+            defaults
+        }
+    }
+
+    fun getProfile(profileId: String): ApiProfile? {
+        return getAllProfiles().find { it.id == profileId }
+    }
+
+    fun saveProfile(profile: ApiProfile) {
+        val current = getAllProfiles().toMutableList()
+        val index = current.indexOfFirst { it.id == profile.id }
+        if (index >= 0) {
+            current[index] = profile
+        } else {
+            current.add(profile)
+        }
+        saveProfilesInternal(current)
+        _settings.value = _settings.value.copy(apiProfiles = current)
+    }
+
+    fun deleteProfile(profileId: String) {
+        val current = getAllProfiles().filter { it.id != profileId }
+        saveProfilesInternal(current)
+        _settings.value = _settings.value.copy(apiProfiles = current)
+    }
+
+    private fun saveProfilesInternal(profiles: List<ApiProfile>) {
+        val array = JSONArray()
+        for (p in profiles) {
+            val obj = JSONObject().apply {
+                put("id", p.id)
+                put("name", p.name)
+                put("provider", p.provider.id)
+                put("model", p.model)
+                put("customEndpoint", p.customEndpoint)
+                put("isEnabled", p.isEnabled)
+                val quotaObj = JSONObject().apply {
+                    put("hasManualLimit", p.quotaConfig.hasManualLimit)
+                    put("limit", p.quotaConfig.limit)
+                    put("unit", p.quotaConfig.unit.id)
+                    put("resetPeriod", p.quotaConfig.resetPeriod.id)
+                    put("periodStartTimestampMs", p.quotaConfig.periodStartTimestampMs)
+                }
+                put("quotaConfig", quotaObj)
+            }
+            array.put(obj)
+        }
+        prefs.edit().putString(KEY_API_PROFILES, array.toString()).apply()
+    }
+
+    private fun parseProfileJson(obj: JSONObject): ApiProfile {
+        val id = obj.optString("id", java.util.UUID.randomUUID().toString())
+        val name = obj.optString("name", "Unnamed Profile")
+        val providerId = obj.optString("provider", AiProviderType.GEMINI.id)
+        val provider = AiProviderType.values().find { it.id == providerId } ?: AiProviderType.GEMINI
+        val model = obj.optString("model", "gemini-3.5-flash")
+        val customEndpoint = obj.optString("customEndpoint", "")
+        val isEnabled = obj.optBoolean("isEnabled", true)
+
+        val quotaObj = obj.optJSONObject("quotaConfig")
+        val quotaConfig = if (quotaObj != null) {
+            val unitId = quotaObj.optString("unit", QuotaUnit.REQUESTS.id)
+            val unit = QuotaUnit.values().find { it.id == unitId } ?: QuotaUnit.REQUESTS
+            val periodId = quotaObj.optString("resetPeriod", QuotaResetPeriod.DAILY.id)
+            val period = QuotaResetPeriod.values().find { it.id == periodId } ?: QuotaResetPeriod.DAILY
+            ProfileQuotaConfig(
+                hasManualLimit = quotaObj.optBoolean("hasManualLimit", false),
+                limit = quotaObj.optLong("limit", 0L),
+                unit = unit,
+                resetPeriod = period,
+                periodStartTimestampMs = quotaObj.optLong("periodStartTimestampMs", System.currentTimeMillis())
+            )
+        } else {
+            ProfileQuotaConfig()
+        }
+
+        return ApiProfile(
+            id = id,
+            name = name,
+            provider = provider,
+            model = model,
+            customEndpoint = customEndpoint,
+            isEnabled = isEnabled,
+            quotaConfig = quotaConfig
+        )
+    }
+
+    private fun createDefaultProfiles(): List<ApiProfile> {
+        return listOf(
+            ApiProfile(
+                id = "default_gemini",
+                name = "Google Gemini Primary",
+                provider = AiProviderType.GEMINI,
+                model = "gemini-3.5-flash",
+                customEndpoint = "",
+                isEnabled = true,
+                quotaConfig = ProfileQuotaConfig(
+                    hasManualLimit = true,
+                    limit = 1500L,
+                    unit = QuotaUnit.REQUESTS,
+                    resetPeriod = QuotaResetPeriod.DAILY
+                )
+            ),
+            ApiProfile(
+                id = "default_openai",
+                name = "OpenAI / Compatible",
+                provider = AiProviderType.OPENAI_COMPATIBLE,
+                model = "gpt-4o-mini",
+                customEndpoint = "",
+                isEnabled = true,
+                quotaConfig = ProfileQuotaConfig(
+                    hasManualLimit = false,
+                    limit = 0L,
+                    unit = QuotaUnit.TOKENS,
+                    resetPeriod = QuotaResetPeriod.MONTHLY
+                )
+            )
+        )
+    }
+
+    private fun loadTaskConfig(task: AiTask, profiles: List<ApiProfile> = getAllProfiles()): TaskAiConfig {
         val prefix = "task_${task.id}"
         val enabled = prefs.getBoolean("${prefix}_enabled", true)
         val providerId = prefs.getString("${prefix}_provider", AiProviderType.GEMINI.id) ?: AiProviderType.GEMINI.id
@@ -119,12 +273,24 @@ class NotebookPreferences(context: Context) {
         }
         val endpoint = prefs.getString("${prefix}_endpoint", "") ?: ""
 
+        val savedPreferredProfile = prefs.getString("${prefix}_preferred_profile", null)
+        val preferredProfileId = savedPreferredProfile ?: profiles.firstOrNull { it.provider == provider }?.id ?: "default_${provider.id}"
+
+        val fallbacksStr = prefs.getString("${prefix}_fallback_profiles", "") ?: ""
+        val fallbackProfileIds = if (fallbacksStr.isNotBlank()) {
+            fallbacksStr.split(",").filter { it.isNotBlank() }
+        } else {
+            profiles.filter { it.id != preferredProfileId }.map { it.id }
+        }
+
         return TaskAiConfig(
             task = task,
             enabled = enabled,
             provider = provider,
             model = model,
-            customEndpoint = endpoint
+            customEndpoint = endpoint,
+            preferredProfileId = preferredProfileId,
+            fallbackProfileIds = fallbackProfileIds
         )
     }
 
@@ -135,6 +301,8 @@ class NotebookPreferences(context: Context) {
             .putString("${prefix}_provider", config.provider.id)
             .putString("${prefix}_model", config.model)
             .putString("${prefix}_endpoint", config.customEndpoint)
+            .putString("${prefix}_preferred_profile", config.preferredProfileId ?: "")
+            .putString("${prefix}_fallback_profiles", config.fallbackProfileIds.joinToString(","))
             .apply()
 
         _settings.value = when (config.task) {
@@ -200,5 +368,6 @@ class NotebookPreferences(context: Context) {
         private const val KEY_AUTO_REMINDER_DETECTION = "pref_auto_reminder_detection"
         private const val KEY_AUTO_REMINDER_SCHEDULING = "pref_auto_reminder_scheduling"
         private const val KEY_FULL_AI_MODE = "pref_full_ai_mode"
+        private const val KEY_API_PROFILES = "pref_api_profiles_json"
     }
 }

@@ -36,6 +36,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -66,6 +67,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import com.example.ai.model.ApiProfile
+import com.example.ai.model.ProfileQuotaStatus
 import com.example.ai.model.AiProviderType
 import com.example.ai.model.AiTask
 import com.example.ai.model.AiUsageRecord
@@ -76,8 +79,8 @@ import com.example.transcription.GeminiTranscriptionFormat
 import kotlinx.coroutines.launch
 
 /**
- * Settings dialog for configuring Full AI Mode, task-specific AI providers,
- * secure API credentials, usage statistics, and existing transcription/reminder automations.
+ * Settings dialog for configuring Full AI Mode, flexible API profiles,
+ * task-specific routing, quota usage dashboard, and automations.
  */
 @Composable
 fun SettingsDialog(
@@ -85,9 +88,14 @@ fun SettingsDialog(
     isGeminiConfigured: Boolean,
     isWhisperModelAvailable: Boolean,
     usageRecords: List<AiUsageRecord> = emptyList(),
+    profileQuotaStatuses: List<ProfileQuotaStatus> = emptyList(),
     getMaskedKey: (AiProviderType) -> String = { "Configured" },
+    getMaskedProfileKey: (ApiProfile) -> String = { "Configured" },
     onSaveApiKey: (AiProviderType, String) -> Unit = { _, _ -> },
     onRemoveApiKey: (AiProviderType) -> Unit = {},
+    onSaveProfile: (ApiProfile, String?) -> Unit = { _, _ -> },
+    onDeleteProfile: (String) -> Unit = {},
+    onTestProfile: (ApiProfile, (Result<String>) -> Unit) -> Unit = { _, _ -> },
     onTestConnection: (TaskAiConfig, (Result<String>) -> Unit) -> Unit = { _, _ -> },
     onResetUsage: () -> Unit = {},
     onFullAiModeChange: (Boolean) -> Unit = {},
@@ -267,6 +275,7 @@ fun SettingsDialog(
 
                 TaskConfigEditor(
                     config = currentTaskConfig,
+                    availableProfiles = settings.apiProfiles,
                     isFullAiMode = settings.fullAiMode,
                     onConfigChange = onTaskConfigChange,
                     onTestConnection = onTestConnection
@@ -277,36 +286,26 @@ fun SettingsDialog(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // ==========================================
-                // SECTION 3: CREDENTIAL SECURITY & API KEYS
+                // SECTION 3: API PROFILES & CREDENTIALS
                 // ==========================================
                 Text(
-                    text = "CREDENTIAL SECURITY & API KEYS",
+                    text = "API PROFILES & CREDENTIALS",
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "Stored locally on-device with Android KeyStore encryption. Never logged or sent to third-party services.",
+                    text = "Configure unlimited profiles with multiple keys per provider, custom endpoints, and encrypted storage.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
                 )
 
-                // Gemini Key Card
-                ApiKeyCard(
-                    provider = AiProviderType.GEMINI,
-                    maskedKey = getMaskedKey(AiProviderType.GEMINI),
-                    onSaveKey = { key -> onSaveApiKey(AiProviderType.GEMINI, key) },
-                    onRemoveKey = { onRemoveApiKey(AiProviderType.GEMINI) }
-                )
-
-                Spacer(modifier = Modifier.height(8.dp))
-
-                // OpenAI Key Card
-                ApiKeyCard(
-                    provider = AiProviderType.OPENAI_COMPATIBLE,
-                    maskedKey = getMaskedKey(AiProviderType.OPENAI_COMPATIBLE),
-                    onSaveKey = { key -> onSaveApiKey(AiProviderType.OPENAI_COMPATIBLE, key) },
-                    onRemoveKey = { onRemoveApiKey(AiProviderType.OPENAI_COMPATIBLE) }
+                ApiProfilesSection(
+                    profiles = settings.apiProfiles,
+                    getMaskedKey = getMaskedProfileKey,
+                    onSaveProfile = onSaveProfile,
+                    onDeleteProfile = onDeleteProfile,
+                    onTestProfile = onTestProfile
                 )
 
                 Spacer(modifier = Modifier.height(18.dp))
@@ -314,20 +313,28 @@ fun SettingsDialog(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // ==========================================
-                // SECTION 4: LOCAL USAGE & REQUEST VISIBILITY
+                // SECTION 4: QUOTA USAGE DASHBOARD
                 // ==========================================
                 Text(
-                    text = "USAGE & REQUEST VISIBILITY",
+                    text = "QUOTA USAGE DASHBOARD",
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "Track requests made by this app grouped by task and provider.",
+                    text = "Monitor consumed and remaining quotas per profile with automatic rate limit failover tracking.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
                 )
 
+                QuotaDashboardCard(
+                    statuses = profileQuotaStatuses,
+                    onResetUsage = onResetUsage
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Secondary Usage Tracker
                 UsageSummaryCard(
                     usageRecords = usageRecords,
                     onResetUsage = onResetUsage
@@ -522,11 +529,12 @@ fun SettingsDialog(
 }
 
 /**
- * Task-specific editor for configuring provider, model, endpoint, and testing connectivity.
+ * Task-specific editor for configuring provider, model, endpoint, preferred profile, and fallback list.
  */
 @Composable
 private fun TaskConfigEditor(
     config: TaskAiConfig,
+    availableProfiles: List<ApiProfile>,
     isFullAiMode: Boolean,
     onConfigChange: (TaskAiConfig) -> Unit,
     onTestConnection: (TaskAiConfig, (Result<String>) -> Unit) -> Unit
@@ -573,9 +581,199 @@ private fun TaskConfigEditor(
 
             AnimatedVisibility(visible = config.enabled) {
                 Column {
-                    Spacer(modifier = Modifier.height(12.dp))
+                    // PREFERRED PROFILE SELECTION
+                    if (availableProfiles.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "PREFERRED API PROFILE",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Primary API profile used for ${config.task.displayName}.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+
+                        // Default / None option
+                        val isDefaultSelected = config.preferredProfileId == null
+                        Surface(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 2.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    onConfigChange(config.copy(preferredProfileId = null))
+                                }
+                                .testTag("preferred_profile_default_${config.task.id}"),
+                            color = if (isDefaultSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = isDefaultSelected,
+                                    onClick = { onConfigChange(config.copy(preferredProfileId = null)) }
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Column {
+                                    Text("Automatic / Default Provider", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
+                                    Text("Use provider and model configured below", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+
+                        // Each profile option
+                        availableProfiles.forEach { profile ->
+                            val isSelected = config.preferredProfileId == profile.id
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 2.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .clickable {
+                                        onConfigChange(
+                                            config.copy(
+                                                preferredProfileId = profile.id,
+                                                provider = profile.provider,
+                                                model = profile.model,
+                                                customEndpoint = profile.customEndpoint
+                                            )
+                                        )
+                                        modelInput = profile.model
+                                        endpointInput = profile.customEndpoint
+                                    }
+                                    .testTag("preferred_profile_${config.task.id}_${profile.id}"),
+                                color = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                shape = RoundedCornerShape(8.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = {
+                                            onConfigChange(
+                                                config.copy(
+                                                    preferredProfileId = profile.id,
+                                                    provider = profile.provider,
+                                                    model = profile.model,
+                                                    customEndpoint = profile.customEndpoint
+                                                )
+                                            )
+                                            modelInput = profile.model
+                                            endpointInput = profile.customEndpoint
+                                        }
+                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(profile.name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold))
+                                            if (!profile.isEnabled) {
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("(Disabled)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                                            }
+                                        }
+                                        Text("${profile.provider.displayName} • ${profile.model}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                            }
+                        }
+
+                        // FALLBACK PROFILES SELECTION
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "ORDERED FALLBACK LIST",
+                            style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "If preferred profile hits rate limits (429) or runs out of quota, automatically failover to these profiles in order.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 6.dp)
+                        )
+
+                        val eligibleFallbacks = availableProfiles.filter { it.id != config.preferredProfileId }
+                        if (eligibleFallbacks.isEmpty()) {
+                            Text(
+                                "No additional profiles available for fallback. Add more profiles below.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        } else {
+                            eligibleFallbacks.forEach { profile ->
+                                val fallbackIndex = config.fallbackProfileIds.indexOf(profile.id)
+                                val isFallback = fallbackIndex >= 0
+
+                                Surface(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(vertical = 2.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable {
+                                            val newFallbacks = if (isFallback) {
+                                                config.fallbackProfileIds.filter { it != profile.id }
+                                            } else {
+                                                config.fallbackProfileIds + profile.id
+                                            }
+                                            onConfigChange(config.copy(fallbackProfileIds = newFallbacks))
+                                        }
+                                        .testTag("fallback_profile_${config.task.id}_${profile.id}"),
+                                    color = if (isFallback) MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f),
+                                    shape = RoundedCornerShape(8.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Checkbox(
+                                            checked = isFallback,
+                                            onCheckedChange = { checked ->
+                                                val newFallbacks = if (checked) {
+                                                    if (!config.fallbackProfileIds.contains(profile.id)) {
+                                                        config.fallbackProfileIds + profile.id
+                                                    } else config.fallbackProfileIds
+                                                } else {
+                                                    config.fallbackProfileIds.filter { it != profile.id }
+                                                }
+                                                onConfigChange(config.copy(fallbackProfileIds = newFallbacks))
+                                            }
+                                        )
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                                Text(profile.name, style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
+                                                if (isFallback) {
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Surface(
+                                                        shape = RoundedCornerShape(4.dp),
+                                                        color = MaterialTheme.colorScheme.primary
+                                                    ) {
+                                                        Text(
+                                                            "Priority #${fallbackIndex + 1}",
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                            color = MaterialTheme.colorScheme.onPrimary,
+                                                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp)
+                                                        )
+                                                    }
+                                                }
+                                            }
+                                            Text("${profile.provider.displayName} • ${profile.model}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(14.dp))
                     Text(
-                        text = "PROVIDER SELECTION",
+                        text = "MANUAL PROVIDER & MODEL OVERRIDE",
                         style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                         color = MaterialTheme.colorScheme.primary
                     )

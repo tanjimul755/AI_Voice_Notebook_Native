@@ -75,6 +75,63 @@ class SecureKeyStorage(private val context: Context) {
     }
 
     @Synchronized
+    fun saveProfileKey(profileId: String, key: String) {
+        val trimmed = key.trim()
+        if (trimmed.isEmpty()) {
+            removeProfileKey(profileId)
+            return
+        }
+        val encrypted = encrypt(trimmed)
+        prefs.edit().putString(getProfilePrefKey(profileId), encrypted).apply()
+    }
+
+    @Synchronized
+    fun removeProfileKey(profileId: String) {
+        prefs.edit().remove(getProfilePrefKey(profileId)).apply()
+    }
+
+    @Synchronized
+    fun getProfileKey(profileId: String, provider: AiProviderType? = null): String? {
+        val encryptedData = prefs.getString(getProfilePrefKey(profileId), null)
+        if (!encryptedData.isNullOrBlank()) {
+            val decrypted = decrypt(encryptedData)
+            if (!decrypted.isNullOrBlank()) {
+                return decrypted
+            }
+        }
+        // Fallback to provider-level key if profile has no individual key
+        if (provider != null) {
+            return getApiKey(provider)
+        }
+        return null
+    }
+
+    fun hasProfileKey(profileId: String): Boolean {
+        val encryptedData = prefs.getString(getProfilePrefKey(profileId), null)
+        return !encryptedData.isNullOrBlank()
+    }
+
+    fun isProfileKeyAvailable(profileId: String, provider: AiProviderType? = null): Boolean {
+        return !getProfileKey(profileId, provider).isNullOrBlank()
+    }
+
+    fun getMaskedProfileKey(profileId: String, provider: AiProviderType? = null): String {
+        val key = getProfileKey(profileId, provider)
+        if (key.isNullOrBlank()) {
+            return "Not Configured"
+        }
+        val isProfileDirect = hasProfileKey(profileId)
+        val prefix = if (isProfileDirect) "Profile Key: " else "Provider Key: "
+        return if (key.length <= 8) {
+            prefix + "••••••••"
+        } else {
+            val visibleEnding = key.takeLast(4)
+            val dots = "•".repeat(8)
+            "$prefix$dots$visibleEnding"
+        }
+    }
+
+    @Synchronized
     fun clearAllKeysForTesting() {
         prefs.edit().clear().apply()
     }
@@ -106,6 +163,10 @@ class SecureKeyStorage(private val context: Context) {
 
     private fun getPrefKey(provider: AiProviderType): String {
         return "api_key_${provider.id}"
+    }
+
+    private fun getProfilePrefKey(profileId: String): String {
+        return "profile_key_$profileId"
     }
 
     private fun encrypt(plainText: String): String {

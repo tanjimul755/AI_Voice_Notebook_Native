@@ -7,6 +7,8 @@ import com.example.ai.AiManager
 import com.example.ai.model.AiProviderType
 import com.example.ai.model.AiTask
 import com.example.ai.model.AiUsageRecord
+import com.example.ai.model.ApiProfile
+import com.example.ai.model.ProfileQuotaStatus
 import com.example.ai.model.TaskAiConfig
 import com.example.audio.AndroidAudioPlayer
 import com.example.audio.AndroidAudioRecorder
@@ -15,11 +17,14 @@ import com.example.audio.AudioPlayer
 import com.example.audio.AudioRecorder
 import com.example.data.AppDatabase
 import com.example.data.NotebookPreferences
+import android.content.Intent
+import android.util.Log
 import com.example.data.NotebookSettings
 import com.example.data.VoiceNoteRepository
 import com.example.data.VoiceNoteRepositoryImpl
 import com.example.model.VoiceNote
 import com.example.reminder.ReminderAction
+import com.example.reminder.ReminderBroadcastReceiver
 import com.example.reminder.ReminderManager
 import com.example.transcription.AudioTranscriber
 import com.example.transcription.GeminiAudioTranscriber
@@ -85,6 +90,7 @@ data class NotebookUiState(
     val settings: NotebookSettings = NotebookSettings(),
     val fullAiMode: Boolean = true,
     val usageRecords: List<AiUsageRecord> = emptyList(),
+    val profileQuotaStatuses: List<ProfileQuotaStatus> = emptyList(),
     val activeFormatDialogNote: VoiceNote? = null
 )
 
@@ -192,6 +198,7 @@ class VoiceNoteViewModel(
             settings = dm.settings,
             fullAiMode = dm.settings.fullAiMode,
             usageRecords = aiManager.usageTracker.getAllUsage(),
+            profileQuotaStatuses = dm.settings.apiProfiles.map { aiManager.usageTracker.getProfileQuotaStatus(it) },
             activeFormatDialogNote = dm.activeFormatDialogNote
         )
     }.stateIn(
@@ -628,6 +635,52 @@ class VoiceNoteViewModel(
         )
     }
 
+    fun saveProfile(profile: ApiProfile, apiKey: String? = null) {
+        notebookPreferences.saveProfile(profile)
+        if (!apiKey.isNullOrBlank()) {
+            aiManager.secureKeyStorage.saveProfileKey(profile.id, apiKey)
+        }
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            infoMessage = "Profile '${profile.name}' saved."
+        )
+    }
+
+    fun deleteProfile(profileId: String) {
+        val profile = notebookPreferences.getProfile(profileId)
+        val name = profile?.name ?: "Profile"
+        notebookPreferences.deleteProfile(profileId)
+        aiManager.secureKeyStorage.removeProfileKey(profileId)
+        aiManager.usageTracker.resetProfileUsage(profileId)
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            infoMessage = "Profile '$name' deleted."
+        )
+    }
+
+    fun saveProfileApiKey(profileId: String, key: String) {
+        aiManager.secureKeyStorage.saveProfileKey(profileId, key)
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            infoMessage = "API key saved for profile."
+        )
+    }
+
+    fun removeProfileApiKey(profileId: String) {
+        aiManager.secureKeyStorage.removeProfileKey(profileId)
+        _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+            infoMessage = "API key removed for profile."
+        )
+    }
+
+    fun getMaskedProfileKey(profile: ApiProfile): String {
+        return aiManager.secureKeyStorage.getMaskedProfileKey(profile.id, profile.provider)
+    }
+
+    fun testProfile(profile: ApiProfile, task: AiTask = AiTask.TRANSCRIPTION, onResult: (Result<String>) -> Unit) {
+        viewModelScope.launch {
+            val result = aiManager.testProfile(profile, task)
+            onResult(result)
+        }
+    }
+
     fun promptFormatTranscript(note: VoiceNote) {
         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(activeFormatDialogNote = note)
     }
@@ -659,7 +712,8 @@ class VoiceNoteViewModel(
                 targetFormat = targetFormat,
                 config = currentSettings.formattingAiConfig,
                 isFullAiMode = currentSettings.fullAiMode,
-                isExplicitUserAction = true
+                isExplicitUserAction = true,
+                profiles = currentSettings.apiProfiles
             )
 
             if (result.isSuccess) {
@@ -807,7 +861,8 @@ class VoiceNoteViewModel(
                                     format = format,
                                     config = taskConfig,
                                     isFullAiMode = currentSettings.fullAiMode,
-                                    isExplicitUserAction = false
+                                    isExplicitUserAction = false,
+                                    profiles = currentSettings.apiProfiles
                                 )
                                 if (aiResult.isSuccess) {
                                     val transcript = aiResult.getOrThrow()
@@ -972,7 +1027,8 @@ class VoiceNoteViewModel(
                                 format = format,
                                 config = taskConfig,
                                 isFullAiMode = currentSettings.fullAiMode,
-                                isExplicitUserAction = false
+                                isExplicitUserAction = false,
+                                profiles = currentSettings.apiProfiles
                             )
                             if (aiResult.isSuccess) {
                                 val transcript = aiResult.getOrThrow()
@@ -1002,14 +1058,7 @@ class VoiceNoteViewModel(
 
     private suspend fun applyTitleAndReminders(note: VoiceNote, transcript: String) {
         val currentSettings = _dialogsAndMessages.value.settings
-
-        // 1. Contextual Title Generation
-        if (currentSettings.autoTitleGeneration) {
-            val generatedTitle = TitleGenerator.generateTitle(transcript)
-            if (!generatedTitle.isNullOrBlank()) {
-                repository.updateNoteTitle(note.id, generatedTitle)
-            }
-        }
+        val intelligentTitle = TitleGenerator.generateTitle(transcript)
 
         // 2. Reminder Detection & Scheduling
         if (currentSettings.autoReminderDetection) {
@@ -1025,7 +1074,8 @@ class VoiceNoteViewModel(
                     transcript = transcript,
                     config = currentSettings.reminderAiConfig,
                     isFullAiMode = true,
-                    isExplicitUserAction = false
+                    isExplicitUserAction = false,
+                    profiles = currentSettings.apiProfiles
                 )
                 if (aiResult.isSuccess && aiResult.getOrThrow().action != ReminderAction.IGNORE) {
                     val aiReminder = aiResult.getOrThrow()
@@ -1046,6 +1096,17 @@ class VoiceNoteViewModel(
             }
 
             if (reminder != null && reminder.action != ReminderAction.IGNORE) {
+                // Determine short, natural, humanized action title (e.g. "ওষুধ খাও", "App টি চেক করো")
+                val rawAction = if (!reminder.taskSummary.isNullOrBlank() && reminder.taskSummary != transcript) {
+                    reminder.taskSummary
+                } else {
+                    intelligentTitle ?: "Voice Note"
+                }
+                val actionTitle = TitleGenerator.humanizeActionTitle(rawAction)
+
+                // Save action title to note title
+                repository.updateNoteTitle(note.id, actionTitle)
+
                 when (reminder.action) {
                     ReminderAction.CANCEL -> {
                         val targetNote = reminder.targetQuery?.let { query ->
@@ -1068,25 +1129,34 @@ class VoiceNoteViewModel(
                             repository.findActiveReminderByQuery(query)
                         } ?: note
                         val now = System.currentTimeMillis()
-                        var updateTime = reminder.targetTimestampMs
+                        val relSec = reminder.relativeSeconds
+                            ?: localDetection?.relativeSeconds
+                            ?: ReminderManager.extractRelativeSeconds(transcript)
+
+                        var updateTime = if (relSec != null && relSec > 0) {
+                            now + (relSec * 1000L)
+                        } else {
+                            reminder.targetTimestampMs
+                        }
+
                         if (updateTime == null || updateTime <= now) {
                             if (localDetection?.targetTimestampMs != null && localDetection.targetTimestampMs > now) {
                                 updateTime = localDetection.targetTimestampMs
                             } else if (updateTime != null && (now - updateTime) < 30_000L) {
-                                updateTime = now + 8_000L
+                                updateTime = now + 5_000L
                             }
                         }
                         if (updateTime != null && updateTime > now) {
                             val scheduled = reminderManager.scheduleAlarm(
                                 noteId = targetNote.id,
-                                title = targetNote.reminderTask ?: targetNote.title,
+                                title = actionTitle,
                                 text = targetNote.transcription ?: "Voice note reminder",
                                 targetTimestampMs = updateTime
                             )
                             repository.updateReminderDetails(
                                 id = targetNote.id,
                                 timestamp = updateTime,
-                                task = targetNote.reminderTask,
+                                task = actionTitle,
                                 isEnabled = scheduled,
                                 status = if (scheduled) "SCHEDULED" else "UNSCHEDULED"
                             )
@@ -1101,18 +1171,28 @@ class VoiceNoteViewModel(
                     }
                     ReminderAction.CREATE -> {
                         val now = System.currentTimeMillis()
-                        var targetTime = reminder.targetTimestampMs
+                        // Prioritize fresh relativeSeconds calculation so AI network latency does NOT swallow tight constraints
+                        val relativeSec = reminder.relativeSeconds
+                            ?: localDetection?.relativeSeconds
+                            ?: ReminderManager.extractRelativeSeconds(transcript)
+
+                        var targetTime = if (relativeSec != null && relativeSec > 0) {
+                            // FRESH calculation at scheduling moment: 5s constraint fires 5s from NOW
+                            now + (relativeSec * 1000L)
+                        } else {
+                            reminder.targetTimestampMs
+                        }
 
                         // Refine or adjust targetTime if missing, or if network roundtrip made it slightly in the past
                         if (targetTime == null || targetTime <= now) {
                             if (localDetection?.targetTimestampMs != null && localDetection.targetTimestampMs > now) {
                                 targetTime = localDetection.targetTimestampMs
                             } else if (targetTime != null && (now - targetTime) < 60_000L) {
-                                targetTime = now + 10_000L
+                                targetTime = now + 5_000L
                             }
                         }
 
-                        // For short relative reminders (like 10s or 20s), guarantee at least 3 seconds in future
+                        // Guarantee at least 2 seconds in future for positive scheduling
                         if (targetTime != null && targetTime <= now) {
                             targetTime = now + 5_000L
                         }
@@ -1121,18 +1201,18 @@ class VoiceNoteViewModel(
                             if (currentSettings.autoReminderScheduling) {
                                 val scheduled = reminderManager.scheduleAlarm(
                                     noteId = note.id,
-                                    title = reminder.taskSummary,
+                                    title = actionTitle,
                                     text = transcript,
                                     targetTimestampMs = targetTime
                                 )
                                 repository.updateReminderDetails(
                                     id = note.id,
                                     timestamp = targetTime,
-                                    task = reminder.taskSummary,
+                                    task = actionTitle,
                                     isEnabled = scheduled,
                                     status = if (scheduled) "SCHEDULED" else "UNSCHEDULED"
                                 )
-                                val delaySecs = (targetTime - now) / 1000
+                                val delaySecs = ((targetTime - now) / 1000).coerceAtLeast(1L)
                                 val timeLabel = if (delaySecs in 1..60) {
                                     "in ${delaySecs}s"
                                 } else {
@@ -1140,21 +1220,42 @@ class VoiceNoteViewModel(
                                 }
                                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                                     infoMessage = if (scheduled) {
-                                        "Reminder scheduled: \"${reminder.taskSummary}\" ($timeLabel)"
+                                        "Reminder scheduled: \"$actionTitle\" ($timeLabel)"
                                     } else {
-                                        "Reminder detected: ${reminder.taskSummary} (Alarm scheduling failed - check alarm permissions)"
+                                        "Reminder detected: $actionTitle (Alarm scheduling failed - check alarm permissions)"
                                     }
                                 )
+
+                                // For tight constraints (<= 60s), launch a coroutine timer as a guaranteed immediate trigger
+                                val delayMs = targetTime - System.currentTimeMillis()
+                                if (delayMs in 100L..60_000L) {
+                                    viewModelScope.launch {
+                                        delay(delayMs)
+                                        try {
+                                            val app = getApplication<Application>()
+                                            val fireIntent = Intent(app, ReminderBroadcastReceiver::class.java).apply {
+                                                action = ReminderBroadcastReceiver.ACTION_FIRE_REMINDER
+                                                putExtra(ReminderBroadcastReceiver.EXTRA_NOTE_ID, note.id)
+                                                putExtra(ReminderBroadcastReceiver.EXTRA_NOTE_TITLE, actionTitle)
+                                                putExtra(ReminderBroadcastReceiver.EXTRA_REMINDER_TASK, actionTitle)
+                                                putExtra(ReminderBroadcastReceiver.EXTRA_REMINDER_TEXT, transcript)
+                                            }
+                                            app.sendBroadcast(fireIntent)
+                                        } catch (e: Exception) {
+                                            Log.w("VoiceNoteViewModel", "Tight constraint countdown trigger failed", e)
+                                        }
+                                    }
+                                }
                             } else {
                                 repository.updateReminderDetails(
                                     id = note.id,
                                     timestamp = targetTime,
-                                    task = reminder.taskSummary,
+                                    task = actionTitle,
                                     isEnabled = false,
                                     status = "UNSCHEDULED"
                                 )
                                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                                    infoMessage = "Reminder detected: ${reminder.taskSummary} (Tap bell to schedule)"
+                                    infoMessage = "Reminder detected: $actionTitle (Tap bell to schedule)"
                                 )
                             }
                         } else {
@@ -1162,17 +1263,27 @@ class VoiceNoteViewModel(
                             repository.updateReminderDetails(
                                 id = note.id,
                                 timestamp = null,
-                                task = reminder.taskSummary,
-                                isEnabled = false,
+                                task = actionTitle,
+                               isEnabled = false,
                                 status = "UNSCHEDULED"
                             )
                             _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
-                                infoMessage = "Reminder detected: ${reminder.taskSummary} (Tap bell to set time)"
+                                infoMessage = "Reminder detected: $actionTitle (Tap bell to set time)"
                             )
                         }
                     }
                     else -> {}
                 }
+            } else {
+                // Not a reminder: apply intelligent title to ordinary note
+                if (currentSettings.autoTitleGeneration && !intelligentTitle.isNullOrBlank()) {
+                    repository.updateNoteTitle(note.id, intelligentTitle)
+                }
+            }
+        } else {
+            // Reminder detection disabled: apply intelligent title to ordinary note
+            if (currentSettings.autoTitleGeneration && !intelligentTitle.isNullOrBlank()) {
+                repository.updateNoteTitle(note.id, intelligentTitle)
             }
         }
     }
@@ -1370,7 +1481,8 @@ class VoiceNoteViewModel(
                         format = format,
                         config = taskConfig,
                         isFullAiMode = currentSettings.fullAiMode,
-                        isExplicitUserAction = true
+                        isExplicitUserAction = true,
+                        profiles = currentSettings.apiProfiles
                     )
                     if (result.isSuccess) {
                         val transcript = result.getOrThrow()

@@ -152,7 +152,15 @@ class OpenAiCompatibleClient(
                 You are a smart reminder assistant for a voice notebook.
                 Current Reference Time: $nowFormatted (Epoch ms: $now).
 
-                Analyze this transcript and extract any reminder, alarm, or task schedule instructions.
+                Analyze this transcript and extract any reminder, alert, alarm, or task schedule instructions.
+
+                TASK SUMMARY RULES (CRITICAL):
+                - The "taskSummary" MUST be a short, natural, humanized action title in familiar 2nd-person imperative (আদেশ/অনুরোধসূচক ক্রিয়াপদ).
+                - In Bengali: NEVER use verbal nouns like 'চেক করা', 'খাওয়া', 'দেখা' (e.g. NEVER 'App চেক করা' or 'এই অ্যাপ টা চেক করা').
+                  ALWAYS use natural imperative forms like 'App টি চেক করো', 'ওষুধ খাও', 'ডাক্তারকে ফোন করো'.
+                - In English: Use standard imperative verb + object (e.g. 'Check this app', 'Take medicine', 'Call doctor').
+                - NEVER include reminder filler words ('please', 'remind me', 'মনে করিয়ে দিও'), pronouns ('আমাকে'), or time phrases ('৫ সেকেন্ড পর', 'in 10 seconds').
+
                 Supported Actions:
                 - "CREATE": user wants to set a new reminder or alarm.
                 - "UPDATE": user wants to change time or reschedule an existing reminder.
@@ -162,7 +170,8 @@ class OpenAiCompatibleClient(
                 Respond with ONLY a valid, raw JSON object:
                 {
                   "action": "CREATE" | "UPDATE" | "CANCEL" | "IGNORE",
-                  "taskSummary": "concise description of the task",
+                  "taskSummary": "natural imperative action title (e.g. 'App টি চেক করো', 'ওষুধ খাও', 'Buy milk')",
+                  "relativeSeconds": <integer seconds from now if a relative duration is mentioned, e.g. 5 for '৫ সেকেন্ড পর', 10 for '10 seconds', 60 for '1 minute', or null>,
                   "targetTimestampMs": <calculated epoch timestamp in milliseconds for when the reminder should fire, or null if no explicit time>,
                   "isExplicitDateTime": <true if explicit time/date specified, false if relative or none>,
                   "targetQuery": <search keyword to find existing note for UPDATE or CANCEL, or null>
@@ -404,13 +413,23 @@ class OpenAiCompatibleClient(
             } catch (_: Exception) {
                 ReminderAction.CREATE
             }
-            val taskSummary = json.optString("taskSummary").ifBlank { originalTranscript.take(50) }
-            val timestamp = if (json.has("targetTimestampMs") && !json.isNull("targetTimestampMs")) {
-                json.getLong("targetTimestampMs")
+            val rawSummary = json.optString("taskSummary").ifBlank { originalTranscript.take(50) }
+            val taskSummary = com.example.util.TitleGenerator.humanizeActionTitle(rawSummary)
+            val jsonRelativeSec = if (json.has("relativeSeconds") && !json.isNull("relativeSeconds")) {
+                json.optLong("relativeSeconds", -1L).takeIf { it > 0 }
             } else {
                 null
             }
-            val isExplicit = json.optBoolean("isExplicitDateTime", false)
+            val relativeSec = jsonRelativeSec ?: com.example.reminder.ReminderManager.extractRelativeSeconds(originalTranscript)
+            val timestamp = when {
+                relativeSec != null -> System.currentTimeMillis() + (relativeSec * 1000L)
+                json.has("targetTimestampMs") && !json.isNull("targetTimestampMs") -> {
+                    val raw = json.getLong("targetTimestampMs")
+                    if (raw in 1_000_000_000L..9_999_999_999L) raw * 1000L else raw
+                }
+                else -> null
+            }
+            val isExplicit = json.optBoolean("isExplicitDateTime", false) || relativeSec != null
             val targetQuery = json.optString("targetQuery").takeIf { it.isNotBlank() }
 
             DetectedReminder(
@@ -418,7 +437,8 @@ class OpenAiCompatibleClient(
                 taskSummary = taskSummary,
                 targetTimestampMs = timestamp,
                 isExplicitDateTime = isExplicit,
-                targetQuery = targetQuery
+                targetQuery = targetQuery,
+                relativeSeconds = relativeSec
             )
         } catch (e: Exception) {
             Log.w(TAG, "Failed to parse OpenAI structured reminder JSON: $rawJson", e)

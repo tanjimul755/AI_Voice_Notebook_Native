@@ -40,7 +40,8 @@ data class DetectedReminder(
     val taskSummary: String,
     val targetTimestampMs: Long? = null,
     val isExplicitDateTime: Boolean = false,
-    val targetQuery: String? = null
+    val targetQuery: String? = null,
+    val relativeSeconds: Long? = null
 )
 
 /**
@@ -398,13 +399,15 @@ class ReminderManager(private val context: Context) {
         val taskSummary = extractTaskSummary(transcript)
 
         // Attempt to parse explicit time/date (including relative delays)
+        val relSec = extractRelativeSeconds(transcript)
         val targetTimestamp = parseExplicitTimestamp(lower)
 
         return DetectedReminder(
             action = ReminderAction.CREATE,
             taskSummary = taskSummary,
             targetTimestampMs = targetTimestamp,
-            isExplicitDateTime = targetTimestamp != null
+            isExplicitDateTime = targetTimestamp != null || relSec != null,
+            relativeSeconds = relSec
         )
     }
 
@@ -427,6 +430,11 @@ class ReminderManager(private val context: Context) {
     }
 
     private fun extractTaskSummary(rawText: String): String {
+        val intelligentAction = com.example.util.TitleGenerator.extractActionTitle(rawText)
+        if (!intelligentAction.isNullOrBlank()) {
+            return intelligentAction
+        }
+
         var text = rawText.trim()
         val lower = text.lowercase(Locale.ROOT)
 
@@ -512,18 +520,78 @@ class ReminderManager(private val context: Context) {
             .trimEnd('.', '!', '?')
     }
 
-    private fun normalizeDigits(input: String): String {
-        val banglaDigits = "০১২৩৪৫৬৭৮৯"
-        val sb = StringBuilder()
-        for (ch in input) {
-            val idx = banglaDigits.indexOf(ch)
-            if (idx >= 0) {
-                sb.append(idx)
-            } else {
-                sb.append(ch)
+    companion object {
+        fun normalizeDigits(input: String): String {
+            val banglaDigits = "০১২৩৪৫৬৭৮৯"
+            val sb = StringBuilder()
+            for (ch in input) {
+                val idx = banglaDigits.indexOf(ch)
+                if (idx >= 0) {
+                    sb.append(idx)
+                } else {
+                    sb.append(ch)
+                }
             }
+            return sb.toString()
         }
-        return sb.toString()
+
+        /**
+         * Extracts relative delay in seconds from speech.
+         * Handles Bengali digits (e.g. "৫ সেকেন্ড পর" -> 5), Bengali words ("পাঁচ সেকেন্ড পর"),
+         * English ("after 10 seconds" -> 10), and relative minutes ("৫ মিনিট পর" -> 300).
+         */
+        fun extractRelativeSeconds(rawText: String): Long? {
+            val textWithDigits = normalizeDigits(rawText)
+
+            // 1. Relative seconds: e.g. "৫ সেকেন্ড পর", "after 10 seconds", "in 5 secs", "5 second pore"
+            val secMatcher = Pattern.compile(
+                "(?:after|in)\\s+(\\d+)\\s*(?:seconds?|secs?|second|sec)\\b|(\\d+)\\s*(?:seconds?|secs?|second|sec)\\s*(?:later|after|pore|por)?\\b|(\\d+)\\s*(?:সেকেন্ড|সেঃ|সেক)\\s*(?:পর|পরে|বাদে)?",
+                Pattern.CASE_INSENSITIVE
+            ).matcher(textWithDigits)
+            if (secMatcher.find()) {
+                val s = secMatcher.group(1)?.toLongOrNull()
+                    ?: secMatcher.group(2)?.toLongOrNull()
+                    ?: secMatcher.group(3)?.toLongOrNull()
+                if (s != null && s > 0) return s
+            }
+
+            // Word-based numbers in Bengali e.g. "পাঁচ সেকেন্ড পর", "দশ সেকেন্ড পর"
+            val wordSecPattern = Pattern.compile("(এক|দুই|তিন|চার|পাঁচ|ছয়|ছয়|সাত|আট|নয়|নয়|দশ|বিশ|ত্রিশ)\\s*(?:সেকেন্ড|সেঃ|সেক)\\s*(?:পর|পরে|বাদে)?", Pattern.CASE_INSENSITIVE)
+            val wMatcher = wordSecPattern.matcher(rawText)
+            if (wMatcher.find()) {
+                val w = wMatcher.group(1)
+                val mapped = when (w) {
+                    "এক" -> 1L
+                    "দুই" -> 2L
+                    "তিন" -> 3L
+                    "চার" -> 4L
+                    "পাঁচ" -> 5L
+                    "ছয়", "ছয়" -> 6L
+                    "সাত" -> 7L
+                    "আট" -> 8L
+                    "নয়", "নয়" -> 9L
+                    "দশ" -> 10L
+                    "বিশ" -> 20L
+                    "ত্রিশ" -> 30L
+                    else -> null
+                }
+                if (mapped != null) return mapped
+            }
+
+            // 2. Relative minutes
+            val minMatcher = Pattern.compile(
+                "(?:after|in)\\s+(\\d+)\\s*(?:minutes?|mins?|minute|min)\\b|(\\d+)\\s*(?:minutes?|mins?|minute|min)\\s*(?:later|after|pore|por)\\b|(\\d+)\\s*(?:মিনিট|মিঃ)\\s*(?:পর|পরে|বাদে)",
+                Pattern.CASE_INSENSITIVE
+            ).matcher(textWithDigits)
+            if (minMatcher.find()) {
+                val m = minMatcher.group(1)?.toLongOrNull()
+                    ?: minMatcher.group(2)?.toLongOrNull()
+                    ?: minMatcher.group(3)?.toLongOrNull()
+                if (m != null && m > 0) return m * 60L
+            }
+
+            return null
+        }
     }
 
     /**
@@ -745,42 +813,60 @@ class ReminderManager(private val context: Context) {
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
 
-            // Android exact alarm check with safe fallback
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                try {
-                    if (alarmManager.canScheduleExactAlarms()) {
-                        alarmManager.setExactAndAllowWhileIdle(
-                            AlarmManager.RTC_WAKEUP,
-                            targetTimestampMs,
-                            pendingIntent
-                        )
-                    } else {
+            val showIntent = PendingIntent.getActivity(
+                context,
+                noteId.toInt(),
+                Intent(context, MainActivity::class.java).apply {
+                    action = ReminderBroadcastReceiver.ACTION_OPEN_NOTE
+                    putExtra("target_note_id", noteId)
+                },
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            // Primary: setAlarmClock provides highest priority, exact, Doze-exempt alarm delivery
+            try {
+                alarmManager.setAlarmClock(
+                    AlarmManager.AlarmClockInfo(targetTimestampMs, showIntent),
+                    pendingIntent
+                )
+            } catch (e: Exception) {
+                Log.w(TAG, "setAlarmClock failed, falling back to setExactAndAllowWhileIdle", e)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    try {
+                        if (alarmManager.canScheduleExactAlarms()) {
+                            alarmManager.setExactAndAllowWhileIdle(
+                                AlarmManager.RTC_WAKEUP,
+                                targetTimestampMs,
+                                pendingIntent
+                            )
+                        } else {
+                            alarmManager.setAndAllowWhileIdle(
+                                AlarmManager.RTC_WAKEUP,
+                                targetTimestampMs,
+                                pendingIntent
+                            )
+                        }
+                    } catch (se: SecurityException) {
+                        Log.w(TAG, "Exact alarm permission denied, falling back to inexact idle alarm", se)
                         alarmManager.setAndAllowWhileIdle(
                             AlarmManager.RTC_WAKEUP,
                             targetTimestampMs,
                             pendingIntent
                         )
                     }
-                } catch (se: SecurityException) {
-                    Log.w(TAG, "Exact alarm permission denied, falling back to inexact idle alarm", se)
-                    alarmManager.setAndAllowWhileIdle(
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    alarmManager.setExactAndAllowWhileIdle(
+                        AlarmManager.RTC_WAKEUP,
+                        targetTimestampMs,
+                        pendingIntent
+                    )
+                } else {
+                    alarmManager.set(
                         AlarmManager.RTC_WAKEUP,
                         targetTimestampMs,
                         pendingIntent
                     )
                 }
-            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    targetTimestampMs,
-                    pendingIntent
-                )
-            } else {
-                alarmManager.set(
-                    AlarmManager.RTC_WAKEUP,
-                    targetTimestampMs,
-                    pendingIntent
-                )
             }
             Log.i(TAG, "Alarm scheduled successfully for note $noteId at $targetTimestampMs")
             true
