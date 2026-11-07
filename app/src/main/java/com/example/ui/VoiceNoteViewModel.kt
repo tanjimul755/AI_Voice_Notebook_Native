@@ -15,7 +15,9 @@ import com.example.audio.AndroidAudioRecorder
 import com.example.audio.AudioFileManager
 import com.example.audio.AudioPlayer
 import com.example.audio.AudioRecorder
+import com.example.audio.SoundEffectsManager
 import com.example.data.AppDatabase
+import com.example.data.MicInputMode
 import com.example.data.NotebookPreferences
 import android.content.Intent
 import android.util.Log
@@ -127,7 +129,8 @@ class VoiceNoteViewModel(
     private val geminiTranscriber: GeminiAudioTranscriber = GeminiAudioTranscriber(application),
     private val notebookPreferences: NotebookPreferences = NotebookPreferences(application),
     private val reminderManager: ReminderManager = ReminderManager(application),
-    val aiManager: AiManager = AiManager(application)
+    val aiManager: AiManager = AiManager(application),
+    val soundEffectsManager: SoundEffectsManager = SoundEffectsManager(application)
 ) : AndroidViewModel(application) {
 
     private val _searchQuery = MutableStateFlow("")
@@ -207,7 +210,11 @@ class VoiceNoteViewModel(
         initialValue = NotebookUiState(isLoading = true)
     )
 
-    // --- Audio Recording Logic ---
+    val currentInfoMessage: String?
+        get() = _dialogsAndMessages.value.infoMessage
+
+    val currentErrorMessage: String?
+        get() = _dialogsAndMessages.value.errorMessage
 
     fun startRecording() {
         stopPlayback()
@@ -321,6 +328,54 @@ class VoiceNoteViewModel(
         audioRecorder.cancel()
         _recordingStatus.value = RecordingStatus.Idle
         recordingElapsedMs = 0L
+    }
+
+    /**
+     * Initiates Push to Talk recording: WhatsApp-style start sound chime + haptics,
+     * followed by microphone recording activation.
+     */
+    fun startPushToTalkRecording() {
+        soundEffectsManager.playStartSound()
+        startRecording()
+    }
+
+    /**
+     * Completes Push to Talk recording when the mic button is released:
+     * - If held for less than 350ms, treats it as an accidental tap and discards without crashing.
+     * - Otherwise, plays the WhatsApp-style voice note sent sound and immediately persists the note.
+     */
+    fun stopPushToTalkRecording(holdDurationMs: Long = 0L) {
+        if (_recordingStatus.value !is RecordingStatus.Recording) return
+
+        val duration = if (holdDurationMs > 0L) holdDurationMs else recordingElapsedMs + (System.currentTimeMillis() - lastResumeTimestamp)
+        if (duration < 350L) {
+            soundEffectsManager.playCancelSound()
+            cancelRecording()
+            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                infoMessage = "Hold the button to record, release to save."
+            )
+            return
+        }
+
+        soundEffectsManager.playStopSound()
+        stopRecording()
+    }
+
+    /**
+     * Cancels Push to Talk recording (e.g. when user slides left to cancel).
+     */
+    fun cancelPushToTalkRecording() {
+        if (_recordingStatus.value !is RecordingStatus.Idle) {
+            soundEffectsManager.playCancelSound()
+            cancelRecording()
+            _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                infoMessage = "Recording discarded."
+            )
+        }
+    }
+
+    fun setMicInputMode(mode: MicInputMode) {
+        notebookPreferences.setMicInputMode(mode)
     }
 
     private fun startRecordingTimer() {
@@ -513,6 +568,42 @@ class VoiceNoteViewModel(
 
     fun dismissEditTitleDialog() {
         _dialogsAndMessages.value = _dialogsAndMessages.value.copy(editingNote = null)
+    }
+
+    fun editNoteTranscription(noteId: Long, newTranscription: String) {
+        viewModelScope.launch {
+            try {
+                repository.editTranscription(noteId, newTranscription)
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    infoMessage = "Transcription updated"
+                )
+            } catch (e: Exception) {
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    errorMessage = "Failed to update transcription: ${e.message}"
+                )
+            }
+        }
+    }
+
+    fun undoNoteTranscription(noteId: Long) {
+        viewModelScope.launch {
+            try {
+                val success = repository.undoTranscription(noteId)
+                if (success) {
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        infoMessage = "Transcription reverted to previous version"
+                    )
+                } else {
+                    _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                        infoMessage = "No previous version available to undo"
+                    )
+                }
+            } catch (e: Exception) {
+                _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
+                    errorMessage = "Failed to undo transcription: ${e.message}"
+                )
+            }
+        }
     }
 
     fun promptDeleteNote(note: VoiceNote) {
@@ -718,7 +809,7 @@ class VoiceNoteViewModel(
 
             if (result.isSuccess) {
                 val formatted = result.getOrThrow()
-                repository.updateTranscription(note.id, formatted)
+                repository.editTranscription(note.id, formatted)
                 _dialogsAndMessages.value = _dialogsAndMessages.value.copy(
                     aiTranscribingNoteId = null,
                     infoMessage = "Transcript formatted to ${targetFormat.displayName}"

@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -25,13 +26,17 @@ import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.CloudQueue
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
+import androidx.compose.material.icons.filled.ExpandLess
+import androidx.compose.material.icons.filled.ExpandMore
 import androidx.compose.material.icons.filled.FormatQuote
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Subtitles
 import androidx.compose.material.icons.filled.Title
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -73,6 +78,7 @@ import com.example.ai.model.AiProviderType
 import com.example.ai.model.AiTask
 import com.example.ai.model.AiUsageRecord
 import com.example.ai.model.TaskAiConfig
+import com.example.data.MicInputMode
 import com.example.data.NotebookSettings
 import com.example.data.TranscriptionMode
 import com.example.transcription.GeminiTranscriptionFormat
@@ -101,6 +107,7 @@ fun SettingsDialog(
     onFullAiModeChange: (Boolean) -> Unit = {},
     onTaskConfigChange: (TaskAiConfig) -> Unit = {},
     onTranscriptionModeChange: (TranscriptionMode) -> Unit,
+    onMicInputModeChange: (MicInputMode) -> Unit = {},
     onAutoTitleChange: (Boolean) -> Unit,
     onAutoTranscribeChange: (Boolean) -> Unit,
     onFormatChange: (GeminiTranscriptionFormat) -> Unit,
@@ -110,6 +117,7 @@ fun SettingsDialog(
     onDismiss: () -> Unit
 ) {
     var selectedTaskIndex by remember { mutableIntStateOf(0) }
+    var isAdvancedExpanded by remember { mutableStateOf(false) }
     val tasks = listOf(AiTask.TRANSCRIPTION, AiTask.REMINDER_INTERPRETATION, AiTask.TRANSCRIPT_FORMATTING)
 
     Dialog(
@@ -118,7 +126,8 @@ fun SettingsDialog(
     ) {
         Surface(
             modifier = Modifier
-                .fillMaxWidth(0.94f)
+                .fillMaxWidth(0.96f)
+                .widthIn(max = 560.dp)
                 .clip(RoundedCornerShape(24.dp))
                 .testTag("settings_dialog"),
             shape = RoundedCornerShape(24.dp),
@@ -224,128 +233,75 @@ fun SettingsDialog(
                 }
 
                 Spacer(modifier = Modifier.height(18.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
 
                 // ==========================================
-                // SECTION 2: TASK-SPECIFIC AI PROVIDER CONFIG
+                // SECTION 2: RECORDING INPUT MODE
                 // ==========================================
                 Text(
-                    text = "TASK-SPECIFIC AI PROVIDERS",
+                    text = "RECORDING INPUT MODE",
                     style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.primary
                 )
                 Text(
-                    text = "Configure different providers and models independently for each AI task.",
+                    text = "Choose between traditional tap-to-record or WhatsApp-style push-to-talk.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
                 )
 
-                TabRow(
-                    selectedTabIndex = selectedTaskIndex,
-                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
-                    modifier = Modifier.clip(RoundedCornerShape(12.dp))
-                ) {
-                    tasks.forEachIndexed { index, task ->
-                        Tab(
-                            selected = selectedTaskIndex == index,
-                            onClick = { selectedTaskIndex = index },
-                            text = {
+                MicInputMode.values().forEach { mode ->
+                    val isSelected = settings.micInputMode == mode
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 4.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .clickable { onMicInputModeChange(mode) }
+                            .testTag("mic_input_mode_${mode.id}"),
+                        colors = CardDefaults.cardColors(
+                            containerColor = if (isSelected) {
+                                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)
+                            } else {
+                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
+                            }
+                        ),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = isSelected,
+                                onClick = { onMicInputModeChange(mode) }
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = when (task) {
-                                        AiTask.TRANSCRIPTION -> "Audio"
-                                        AiTask.REMINDER_INTERPRETATION -> "Reminders"
-                                        AiTask.TRANSCRIPT_FORMATTING -> "Formatting"
-                                    },
-                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+                                    text = mode.title,
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.SemiBold),
+                                    color = MaterialTheme.colorScheme.onSurface
                                 )
-                            },
-                            modifier = Modifier.testTag("task_tab_${task.id}")
-                        )
+                                Text(
+                                    text = mode.description,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                val activeTask = tasks[selectedTaskIndex]
-                val currentTaskConfig = when (activeTask) {
-                    AiTask.TRANSCRIPTION -> settings.transcriptionAiConfig
-                    AiTask.REMINDER_INTERPRETATION -> settings.reminderAiConfig
-                    AiTask.TRANSCRIPT_FORMATTING -> settings.formattingAiConfig
-                }
-
-                TaskConfigEditor(
-                    config = currentTaskConfig,
-                    availableProfiles = settings.apiProfiles,
-                    isFullAiMode = settings.fullAiMode,
-                    onConfigChange = onTaskConfigChange,
-                    onTestConnection = onTestConnection
-                )
-
-                Spacer(modifier = Modifier.height(18.dp))
+                Spacer(modifier = Modifier.height(16.dp))
                 HorizontalDivider()
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // ==========================================
-                // SECTION 3: API PROFILES & CREDENTIALS
-                // ==========================================
-                Text(
-                    text = "API PROFILES & CREDENTIALS",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Text(
-                    text = "Configure unlimited profiles with multiple keys per provider, custom endpoints, and encrypted storage.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
-                )
-
-                ApiProfilesSection(
-                    profiles = settings.apiProfiles,
-                    getMaskedKey = getMaskedProfileKey,
-                    onSaveProfile = onSaveProfile,
-                    onDeleteProfile = onDeleteProfile,
-                    onTestProfile = onTestProfile
-                )
-
-                Spacer(modifier = Modifier.height(18.dp))
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // ==========================================
-                // SECTION 4: QUOTA USAGE DASHBOARD
-                // ==========================================
-                Text(
-                    text = "QUOTA USAGE DASHBOARD",
-                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
-                    color = MaterialTheme.colorScheme.primary
-                )
-                Text(
-                    text = "Monitor consumed and remaining quotas per profile with automatic rate limit failover tracking.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
-                )
-
-                QuotaDashboardCard(
-                    statuses = profileQuotaStatuses,
-                    onResetUsage = onResetUsage
-                )
-
-                Spacer(modifier = Modifier.height(12.dp))
-
-                // Secondary Usage Tracker
-                UsageSummaryCard(
-                    usageRecords = usageRecords,
-                    onResetUsage = onResetUsage
-                )
-
-                Spacer(modifier = Modifier.height(18.dp))
-                HorizontalDivider()
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // ==========================================
-                // SECTION 5: AUTOMATIC TRANSCRIPTION MODES
+                // SECTION 3: AUTOMATIC TRANSCRIPTION MODES
                 // ==========================================
                 SettingSwitchRow(
                     icon = Icons.Default.Subtitles,
@@ -481,7 +437,7 @@ fun SettingsDialog(
                 Spacer(modifier = Modifier.height(16.dp))
 
                 // ==========================================
-                // SECTION 6: SMART AUTOMATIONS
+                // SECTION 3: SMART AUTOMATION
                 // ==========================================
                 Text(
                     text = "SMART AUTOMATION",
@@ -521,6 +477,186 @@ fun SettingsDialog(
                     enabled = settings.autoReminderDetection,
                     testTag = "setting_switch_reminder_scheduling"
                 )
+
+                Spacer(modifier = Modifier.height(18.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // ==========================================
+                // SECTION 4: QUOTA USAGE DASHBOARD
+                // ==========================================
+                Text(
+                    text = "QUOTA USAGE DASHBOARD",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = "Monitor consumed and remaining quotas per profile with automatic rate limit failover tracking.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+                )
+
+                QuotaDashboardCard(
+                    statuses = profileQuotaStatuses,
+                    onResetUsage = onResetUsage
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                // Secondary Usage Tracker
+                UsageSummaryCard(
+                    usageRecords = usageRecords,
+                    onResetUsage = onResetUsage
+                )
+
+                Spacer(modifier = Modifier.height(18.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(16.dp))
+
+                // ==========================================
+                // SECTION 5: ADVANCED & DEVELOPER SETTINGS
+                // (Task-Specific AI Providers & API Profiles)
+                // ==========================================
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(16.dp))
+                        .clickable { isAdvancedExpanded = !isAdvancedExpanded }
+                        .testTag("toggle_advanced_settings_button"),
+                    colors = CardDefaults.cardColors(
+                        containerColor = if (isAdvancedExpanded) {
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        } else {
+                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                        }
+                    ),
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Tune,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(24.dp)
+                            )
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "Advanced & Developer Settings",
+                                    style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = if (isAdvancedExpanded) "Tap to collapse provider & profile controls" else "Task-specific AI routing, fallback chains & API profiles",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(
+                                onClick = { isAdvancedExpanded = !isAdvancedExpanded }
+                            ) {
+                                Icon(
+                                    imageVector = if (isAdvancedExpanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                                    contentDescription = if (isAdvancedExpanded) "Collapse" else "Expand",
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+
+                        AnimatedVisibility(visible = isAdvancedExpanded) {
+                            Column(modifier = Modifier.padding(top = 12.dp)) {
+                                HorizontalDivider()
+                                Spacer(modifier = Modifier.height(14.dp))
+
+                                // Sub-section A: TASK-SPECIFIC AI PROVIDERS
+                                Text(
+                                    text = "TASK-SPECIFIC AI PROVIDERS",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "Configure different providers, models, and fallback chains independently for each AI task.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+                                )
+
+                                TabRow(
+                                    selectedTabIndex = selectedTaskIndex,
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f),
+                                    modifier = Modifier.clip(RoundedCornerShape(12.dp))
+                                ) {
+                                    tasks.forEachIndexed { index, task ->
+                                        Tab(
+                                            selected = selectedTaskIndex == index,
+                                            onClick = { selectedTaskIndex = index },
+                                            text = {
+                                                Text(
+                                                    text = when (task) {
+                                                        AiTask.TRANSCRIPTION -> "Audio"
+                                                        AiTask.REMINDER_INTERPRETATION -> "Reminders"
+                                                        AiTask.TRANSCRIPT_FORMATTING -> "Formatting"
+                                                    },
+                                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.SemiBold)
+                                                )
+                                            },
+                                            modifier = Modifier.testTag("task_tab_${task.id}")
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                val activeTask = tasks[selectedTaskIndex]
+                                val currentTaskConfig = when (activeTask) {
+                                    AiTask.TRANSCRIPTION -> settings.transcriptionAiConfig
+                                    AiTask.REMINDER_INTERPRETATION -> settings.reminderAiConfig
+                                    AiTask.TRANSCRIPT_FORMATTING -> settings.formattingAiConfig
+                                }
+
+                                TaskConfigEditor(
+                                    config = currentTaskConfig,
+                                    availableProfiles = settings.apiProfiles,
+                                    isFullAiMode = settings.fullAiMode,
+                                    onConfigChange = onTaskConfigChange,
+                                    onTestConnection = onTestConnection
+                                )
+
+                                Spacer(modifier = Modifier.height(18.dp))
+                                HorizontalDivider()
+                                Spacer(modifier = Modifier.height(16.dp))
+
+                                // Sub-section B: API PROFILES & CREDENTIALS
+                                Text(
+                                    text = "API PROFILES & CREDENTIALS",
+                                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "Configure unlimited profiles with multiple keys per provider, custom endpoints, and encrypted storage.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(top = 2.dp, bottom = 8.dp)
+                                )
+
+                                Spacer(modifier = Modifier.height(6.dp))
+
+                                ApiProfilesSection(
+                                    profiles = settings.apiProfiles,
+                                    getMaskedKey = getMaskedProfileKey,
+                                    onSaveProfile = onSaveProfile,
+                                    onDeleteProfile = onDeleteProfile,
+                                    onTestProfile = onTestProfile
+                                )
+                            }
+                        }
+                    }
+                }
 
                 Spacer(modifier = Modifier.height(20.dp))
             }
@@ -619,7 +755,7 @@ private fun TaskConfigEditor(
                                     onClick = { onConfigChange(config.copy(preferredProfileId = null)) }
                                 )
                                 Spacer(modifier = Modifier.width(6.dp))
-                                Column {
+                                Column(modifier = Modifier.weight(1f)) {
                                     Text("Automatic / Default Provider", style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Medium))
                                     Text("Use provider and model configured below", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
@@ -778,17 +914,17 @@ private fun TaskConfigEditor(
                         color = MaterialTheme.colorScheme.primary
                     )
 
-                    Row(
+                    Column(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(vertical = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            .padding(vertical = 4.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
                         AiProviderType.values().forEach { provider ->
                             val isSelected = config.provider == provider
                             Card(
                                 modifier = Modifier
-                                    .weight(1f)
+                                    .fillMaxWidth()
                                     .clip(RoundedCornerShape(10.dp))
                                     .clickable {
                                         val newModel = TaskAiConfig.getDefaultModel(config.task, provider)
@@ -805,13 +941,15 @@ private fun TaskConfigEditor(
                                     containerColor = if (isSelected) {
                                         MaterialTheme.colorScheme.primaryContainer
                                     } else {
-                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
                                     }
                                 ),
                                 shape = RoundedCornerShape(10.dp)
                             ) {
                                 Row(
-                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp, vertical = 8.dp),
                                     verticalAlignment = Alignment.CenterVertically
                                 ) {
                                     RadioButton(
@@ -822,11 +960,19 @@ private fun TaskConfigEditor(
                                             onConfigChange(config.copy(provider = provider, model = newModel))
                                         }
                                     )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = provider.displayName,
-                                        style = MaterialTheme.typography.bodySmall.copy(fontWeight = FontWeight.Medium)
-                                    )
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = provider.displayName,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = if (provider == AiProviderType.GEMINI) "Google Gemini API (multimodal audio & text)" else "OpenAI / compatible REST endpoints",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -869,11 +1015,7 @@ private fun TaskConfigEditor(
                     Spacer(modifier = Modifier.height(12.dp))
 
                     // Test connection button
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                    Column(modifier = Modifier.fillMaxWidth()) {
                         OutlinedButton(
                             onClick = {
                                 isTesting = true
@@ -889,7 +1031,9 @@ private fun TaskConfigEditor(
                             },
                             enabled = !isTesting,
                             shape = RoundedCornerShape(8.dp),
-                            modifier = Modifier.testTag("test_connection_button_${config.task.id}")
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .testTag("test_connection_button_${config.task.id}")
                         ) {
                             if (isTesting) {
                                 CircularProgressIndicator(modifier = Modifier.size(14.dp), strokeWidth = 2.dp)
@@ -899,19 +1043,17 @@ private fun TaskConfigEditor(
                         }
 
                         testResultText?.let { msg ->
+                            Spacer(modifier = Modifier.height(6.dp))
                             Surface(
                                 shape = RoundedCornerShape(8.dp),
                                 color = if (testIsSuccess) Color(0xFFE8F5E9) else Color(0xFFFFEBEE),
-                                modifier = Modifier
-                                    .padding(start = 8.dp)
-                                    .weight(1f, fill = false)
+                                modifier = Modifier.fillMaxWidth()
                             ) {
                                 Text(
                                     text = msg,
-                                    style = MaterialTheme.typography.labelSmall,
+                                    style = MaterialTheme.typography.bodySmall,
                                     color = if (testIsSuccess) Color(0xFF2E7D32) else Color(0xFFC62828),
-                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                                    maxLines = 2
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                                 )
                             }
                         }

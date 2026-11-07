@@ -23,6 +23,8 @@ interface VoiceNoteRepository {
     ): VoiceNote
     suspend fun updateNoteTitle(id: Long, newTitle: String)
     suspend fun updateTranscription(id: Long, transcription: String)
+    suspend fun editTranscription(id: Long, newTranscription: String)
+    suspend fun undoTranscription(id: Long): Boolean
     suspend fun updateReminder(id: Long, reminderTimestamp: Long?)
     suspend fun updateReminderDetails(
         id: Long,
@@ -88,6 +90,26 @@ class VoiceNoteRepositoryImpl(
 
     override suspend fun updateTranscription(id: Long, transcription: String) {
         dao.updateTranscription(id, transcription.trim())
+    }
+
+    override suspend fun editTranscription(id: Long, newTranscription: String) {
+        val current = dao.getVoiceNoteById(id)
+        if (current != null) {
+            val oldTranscription = current.transcription
+            dao.updateTranscriptionWithHistory(id, newTranscription.trim(), oldTranscription)
+        }
+    }
+
+    override suspend fun undoTranscription(id: Long): Boolean {
+        val current = dao.getVoiceNoteById(id)
+        return if (current != null && current.previousTranscription != null) {
+            val prev = current.previousTranscription
+            val now = current.transcription
+            dao.updateTranscriptionWithHistory(id, prev, now)
+            true
+        } else {
+            false
+        }
     }
 
     override suspend fun updateReminder(id: Long, reminderTimestamp: Long?) {

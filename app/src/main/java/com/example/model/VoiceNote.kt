@@ -12,6 +12,7 @@ data class VoiceNote(
     val fileSizeBytes: Long,
     val createdAtTimestamp: Long,
     val transcription: String? = null,
+    val previousTranscription: String? = null,
     val tags: String = "",
     val isStarred: Boolean = false,
     val reminderTimestamp: Long? = null,

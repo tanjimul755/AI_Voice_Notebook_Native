@@ -39,6 +39,23 @@ enum class TranscriptionMode(val id: String, val title: String, val description:
 }
 
 /**
+ * Operating mode for voice note recording: Traditional (tap to start/stop) or
+ * Push to Talk (hold to record with start/stop sounds, release to save).
+ */
+enum class MicInputMode(val id: String, val title: String, val description: String) {
+    TRADITIONAL(
+        "traditional",
+        "Traditional (Tap to Record)",
+        "Tap the mic button to start recording, and tap stop when you are done."
+    ),
+    PUSH_TO_TALK(
+        "push_to_talk",
+        "Push to Talk (WhatsApp style)",
+        "Hold the mic button to record with start/stop sounds, release to save."
+    )
+}
+
+/**
  * Data holder for persistent user settings in AI Voice Notebook.
  */
 data class NotebookSettings(
@@ -54,7 +71,8 @@ data class NotebookSettings(
     val apiProfiles: List<ApiProfile> = emptyList(),
     val transcriptionAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.TRANSCRIPTION),
     val reminderAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.REMINDER_INTERPRETATION),
-    val formattingAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.TRANSCRIPT_FORMATTING)
+    val formattingAiConfig: TaskAiConfig = TaskAiConfig(task = AiTask.TRANSCRIPT_FORMATTING),
+    val micInputMode: MicInputMode = MicInputMode.TRADITIONAL
 )
 
 /**
@@ -98,6 +116,9 @@ class NotebookPreferences(context: Context) {
         val fullAi = prefs.getBoolean(KEY_FULL_AI_MODE, true)
         val profiles = getAllProfiles()
 
+        val micModeId = prefs.getString(KEY_MIC_INPUT_MODE, MicInputMode.TRADITIONAL.id)
+        val micMode = MicInputMode.values().find { it.id == micModeId } ?: MicInputMode.TRADITIONAL
+
         return NotebookSettings(
             autoTitleGeneration = prefs.getBoolean(KEY_AUTO_TITLE, true),
             autoTranscription = prefs.getBoolean(KEY_AUTO_TRANSCRIBE, true),
@@ -111,7 +132,8 @@ class NotebookPreferences(context: Context) {
             apiProfiles = profiles,
             transcriptionAiConfig = loadTaskConfig(AiTask.TRANSCRIPTION, profiles),
             reminderAiConfig = loadTaskConfig(AiTask.REMINDER_INTERPRETATION, profiles),
-            formattingAiConfig = loadTaskConfig(AiTask.TRANSCRIPT_FORMATTING, profiles)
+            formattingAiConfig = loadTaskConfig(AiTask.TRANSCRIPT_FORMATTING, profiles),
+            micInputMode = micMode
         )
     }
 
@@ -357,6 +379,11 @@ class NotebookPreferences(context: Context) {
         _settings.value = _settings.value.copy(autoReminderScheduling = enabled)
     }
 
+    fun setMicInputMode(mode: MicInputMode) {
+        prefs.edit().putString(KEY_MIC_INPUT_MODE, mode.id).apply()
+        _settings.value = _settings.value.copy(micInputMode = mode)
+    }
+
     companion object {
         private const val PREFS_NAME = "ai_voice_notebook_prefs"
         private const val KEY_TRANSCRIPTION_MODE = "pref_transcription_mode"
@@ -369,5 +396,6 @@ class NotebookPreferences(context: Context) {
         private const val KEY_AUTO_REMINDER_SCHEDULING = "pref_auto_reminder_scheduling"
         private const val KEY_FULL_AI_MODE = "pref_full_ai_mode"
         private const val KEY_API_PROFILES = "pref_api_profiles_json"
+        private const val KEY_MIC_INPUT_MODE = "pref_mic_input_mode"
     }
 }

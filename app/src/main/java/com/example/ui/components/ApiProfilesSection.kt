@@ -48,6 +48,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.ai.model.AiProviderType
 import com.example.ai.model.ApiProfile
@@ -176,41 +177,46 @@ private fun ProfileListItemCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(
-                    modifier = Modifier.weight(1f),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(modifier = Modifier.weight(1f).padding(end = 8.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            text = profile.name,
+                            style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
+                            color = if (profile.isEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f, fill = false)
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Surface(
+                            shape = RoundedCornerShape(4.dp),
+                            color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
+                        ) {
                             Text(
-                                text = profile.name,
-                                style = MaterialTheme.typography.titleSmall.copy(fontWeight = FontWeight.Bold),
-                                color = if (profile.isEnabled) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.outline
+                                text = profile.provider.displayName,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
                             )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Surface(
-                                shape = RoundedCornerShape(4.dp),
-                                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f)
-                            ) {
-                                Text(
-                                    text = profile.provider.displayName,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                )
-                            }
                         }
-                        Text(
-                            text = "Model: ${profile.model}${if (profile.customEndpoint.isNotBlank()) " • Custom URL" else ""}",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                        Text(
-                            text = "Key: $maskedKey",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.outline
-                        )
                     }
+                    Text(
+                        text = "Model: ${profile.model}${if (profile.customEndpoint.isNotBlank()) " • Custom URL" else ""}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    Text(
+                        text = "Key: $maskedKey",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.outline,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
                 }
 
                 Switch(
@@ -228,7 +234,11 @@ private fun ProfileListItemCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.weight(1f, fill = false),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     OutlinedButton(
                         onClick = {
                             isTesting = true
@@ -252,8 +262,6 @@ private fun ProfileListItemCard(
                         }
                         Text("Test", style = MaterialTheme.typography.labelSmall)
                     }
-
-                    Spacer(modifier = Modifier.width(6.dp))
 
                     OutlinedButton(
                         onClick = onEdit,
@@ -282,15 +290,15 @@ private fun ProfileListItemCard(
             testResultText?.let { msg ->
                 Spacer(modifier = Modifier.height(6.dp))
                 Surface(
-                    shape = RoundedCornerShape(6.dp),
+                    shape = RoundedCornerShape(8.dp),
                     color = if (testIsSuccess) Color(0xFFE8F5E9) else Color(0xFFFFEBEE),
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
                         text = msg,
-                        style = MaterialTheme.typography.labelSmall,
+                        style = MaterialTheme.typography.bodySmall,
                         color = if (testIsSuccess) Color(0xFF2E7D32) else Color(0xFFC62828),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
                     )
                 }
             }
@@ -368,7 +376,9 @@ private fun ProfileEditorCard(
                             }
                         },
                         label = { Text(prov.displayName) },
-                        modifier = Modifier.testTag("provider_chip_${prov.id}")
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("provider_chip_${prov.id}")
                     )
                 }
             }
@@ -460,16 +470,27 @@ private fun ProfileEditorCard(
                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.primary
                 )
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    QuotaUnit.values().forEach { u ->
-                        FilterChip(
-                            selected = selectedUnit == u,
-                            onClick = { selectedUnit = u },
-                            label = { Text(u.displayName, style = MaterialTheme.typography.labelSmall) }
-                        )
+                    QuotaUnit.values().toList().chunked(2).forEach { rowUnits ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            rowUnits.forEach { u ->
+                                FilterChip(
+                                    selected = selectedUnit == u,
+                                    onClick = { selectedUnit = u },
+                                    label = { Text(u.displayName, style = MaterialTheme.typography.labelSmall) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            if (rowUnits.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
                     }
                 }
 
@@ -479,16 +500,27 @@ private fun ProfileEditorCard(
                     style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                     color = MaterialTheme.colorScheme.primary
                 )
-                Row(
+                Column(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    QuotaResetPeriod.values().forEach { p ->
-                        FilterChip(
-                            selected = selectedPeriod == p,
-                            onClick = { selectedPeriod = p },
-                            label = { Text(p.displayName, style = MaterialTheme.typography.labelSmall) }
-                        )
+                    QuotaResetPeriod.values().toList().chunked(2).forEach { rowPeriods ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            rowPeriods.forEach { p ->
+                                FilterChip(
+                                    selected = selectedPeriod == p,
+                                    onClick = { selectedPeriod = p },
+                                    label = { Text(p.displayName, style = MaterialTheme.typography.labelSmall) },
+                                    modifier = Modifier.weight(1f)
+                                )
+                            }
+                            if (rowPeriods.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
                     }
                 }
             }

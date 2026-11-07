@@ -136,6 +136,19 @@ fun VoiceNotebookScreen(
         }
     }
 
+    fun handlePushToTalkStart() {
+        val permissionCheck = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.RECORD_AUDIO
+        )
+        if (permissionCheck == PackageManager.PERMISSION_GRANTED) {
+            hasPermissionDenied = false
+            viewModel.startPushToTalkRecording()
+        } else {
+            permissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+        }
+    }
+
     // Auto-scroll to newly created note without requiring manual scrolling
     LaunchedEffect(uiState.newlyCreatedNoteId) {
         uiState.newlyCreatedNoteId?.let {
@@ -229,11 +242,15 @@ fun VoiceNotebookScreen(
         bottomBar = {
             RecordingBottomBar(
                 recordingStatus = uiState.recordingStatus,
+                micInputMode = uiState.settings.micInputMode,
                 onStartRecording = { handleRecordClick() },
                 onPauseRecording = { viewModel.pauseRecording() },
                 onResumeRecording = { viewModel.resumeRecording() },
                 onStopRecording = { viewModel.stopRecording() },
-                onCancelRecording = { viewModel.cancelRecording() }
+                onCancelRecording = { viewModel.cancelRecording() },
+                onPushToTalkStart = { handlePushToTalkStart() },
+                onPushToTalkStop = { duration -> viewModel.stopPushToTalkRecording(duration) },
+                onPushToTalkCancel = { viewModel.cancelPushToTalkRecording() }
             )
         }
     ) { innerPadding ->
@@ -372,7 +389,13 @@ fun VoiceNotebookScreen(
                             onTranscribe = { viewModel.startTranscribe(note) },
                             onAiTranscribe = { viewModel.startAiTranscribe(note) },
                             onFormatTranscript = { viewModel.promptFormatTranscript(note) },
-                            onEditReminder = { viewModel.promptEditReminder(note) }
+                            onEditReminder = { viewModel.promptEditReminder(note) },
+                            onSaveTranscriptionEdit = { newTranscript ->
+                                viewModel.editNoteTranscription(note.id, newTranscript)
+                            },
+                            onUndoTranscriptionEdit = {
+                                viewModel.undoNoteTranscription(note.id)
+                            }
                         )
                     }
                 }
@@ -483,6 +506,7 @@ fun VoiceNotebookScreen(
             onFullAiModeChange = { viewModel.setFullAiMode(it) },
             onTaskConfigChange = { viewModel.updateTaskAiConfig(it) },
             onTranscriptionModeChange = { viewModel.setTranscriptionMode(it) },
+            onMicInputModeChange = { viewModel.setMicInputMode(it) },
             onAutoTitleChange = { viewModel.setAutoTitleGeneration(it) },
             onAutoTranscribeChange = { viewModel.setAutoTranscription(it) },
             onFormatChange = { viewModel.setDefaultTranscriptionFormat(it) },

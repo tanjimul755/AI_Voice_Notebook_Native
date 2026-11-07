@@ -12,6 +12,7 @@ import com.example.data.VoiceNoteEntity
 import com.example.data.VoiceNoteRepository
 import com.example.data.VoiceNoteRepositoryImpl
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -222,6 +223,49 @@ class ExampleRobolectricTest {
         val updated = repository.getNoteById(saved.id)
         assertNotNull(updated)
         assertEquals(simulatedTranscription, updated?.transcription)
+    }
+
+    @Test
+    fun transcription_editAndUndo_persistsAndRestoresPreviousVersion() = runBlocking {
+        val tempFile = File(context.filesDir, "test_edit_undo.m4a")
+        tempFile.writeText("test audio content")
+
+        val saved = repository.saveNote(
+            title = "Meeting Notes",
+            file = tempFile,
+            durationMs = 20000L,
+            tags = "Meeting",
+            transcription = "Original speech transcription from Whisper."
+        )
+
+        val noteId = saved.id
+        assertEquals("Original speech transcription from Whisper.", saved.transcription)
+        assertNull(saved.previousTranscription)
+
+        // 1. Edit the transcription
+        val userEditedText = "Corrected speech transcription: discuss quarterly product roadmap."
+        repository.editTranscription(noteId, userEditedText)
+
+        val afterEdit = repository.getNoteById(noteId)
+        assertNotNull(afterEdit)
+        assertEquals(userEditedText, afterEdit?.transcription)
+        assertEquals("Original speech transcription from Whisper.", afterEdit?.previousTranscription)
+
+        // 2. Undo the edit
+        val undoSuccess = repository.undoTranscription(noteId)
+        assertTrue(undoSuccess)
+
+        val afterUndo = repository.getNoteById(noteId)
+        assertNotNull(afterUndo)
+        assertEquals("Original speech transcription from Whisper.", afterUndo?.transcription)
+        assertEquals(userEditedText, afterUndo?.previousTranscription)
+
+        // 3. Undo again acts as redo/toggle
+        val secondUndo = repository.undoTranscription(noteId)
+        assertTrue(secondUndo)
+
+        val afterSecondUndo = repository.getNoteById(noteId)
+        assertEquals(userEditedText, afterSecondUndo?.transcription)
     }
 
     @Test
@@ -929,6 +973,220 @@ class ExampleRobolectricTest {
             assertNotNull(current)
             assertEquals("SCHEDULED", current!!.reminderStatus)
         }
+    }
+
+    @Test
+    fun notebookPreferences_micInputMode_persistsAndRetrieves() {
+        val prefs = com.example.data.NotebookPreferences(context)
+
+        // Default should be Traditional
+        assertEquals(com.example.data.MicInputMode.TRADITIONAL, prefs.settings.value.micInputMode)
+
+        // Switch to Push to Talk
+        prefs.setMicInputMode(com.example.data.MicInputMode.PUSH_TO_TALK)
+        assertEquals(com.example.data.MicInputMode.PUSH_TO_TALK, prefs.settings.value.micInputMode)
+
+        // Reload to verify persistence
+        val reloadedPrefs = com.example.data.NotebookPreferences(context)
+        assertEquals(com.example.data.MicInputMode.PUSH_TO_TALK, reloadedPrefs.settings.value.micInputMode)
+
+        // Switch back to Traditional
+        reloadedPrefs.setMicInputMode(com.example.data.MicInputMode.TRADITIONAL)
+        assertEquals(com.example.data.MicInputMode.TRADITIONAL, reloadedPrefs.settings.value.micInputMode)
+    }
+
+    @Test
+    fun soundEffectsManager_executesAllChimesGracefully() {
+        val soundManager = com.example.audio.SoundEffectsManager(context)
+        // Ensure synthesized PCM playback for start, stop, and cancel execute without crashing
+        soundManager.playStartSound()
+        soundManager.playStopSound()
+        soundManager.playCancelSound()
+    }
+
+    @Test
+    fun pushToTalk_shortHoldDiscardsAccidentalTap() = runBlocking<Unit> {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val mockRecorder = object : com.example.audio.AudioRecorder {
+            var recording = false
+            override val isRecording: Boolean get() = recording
+            override val isPaused: Boolean get() = false
+            override fun start(outputFile: File): Result<Unit> {
+                recording = true
+                return Result.success(Unit)
+            }
+            override fun pause(): Result<Unit> = Result.success(Unit)
+            override fun resume(): Result<Unit> = Result.success(Unit)
+            override fun stop(): Result<File> {
+                recording = false
+                return Result.success(File(context.cacheDir, "test.m4a"))
+            }
+            override fun cancel() {
+                recording = false
+            }
+            override fun getMaxAmplitude(): Int = 0
+        }
+        val mockPlayer = object : com.example.audio.AudioPlayer {
+            override val isPlaying: Boolean get() = false
+            override val currentPosition: Int get() = 0
+            override val duration: Int get() = 0
+            override fun play(file: File, onCompletion: () -> Unit, onError: (String) -> Unit): Result<Unit> = Result.success(Unit)
+            override fun pause() {}
+            override fun resume() {}
+            override fun stop() {}
+            override fun seekTo(positionMs: Int) {}
+            override fun release() {}
+        }
+
+        val viewModel = com.example.ui.VoiceNoteViewModel(
+            application = app,
+            repository = repository,
+            audioRecorder = mockRecorder,
+            audioPlayer = mockPlayer,
+            audioFileManager = audioFileManager
+        )
+
+        val collectJob = launch(kotlinx.coroutines.Dispatchers.Unconfined) {
+            viewModel.uiState.collect {}
+        }
+
+        // Start PTT
+        viewModel.startPushToTalkRecording()
+        assertTrue(mockRecorder.recording)
+
+        // Release very quickly (<350ms)
+        viewModel.stopPushToTalkRecording(holdDurationMs = 120L)
+        assertFalse(mockRecorder.recording)
+        assertEquals("Hold the button to record, release to save.", viewModel.currentInfoMessage)
+
+        collectJob.cancel()
+    }
+
+    @Test
+    fun pushToTalk_slideCancelDiscardsRecording() = runBlocking<Unit> {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val mockRecorder = object : com.example.audio.AudioRecorder {
+            var recording = false
+            override val isRecording: Boolean get() = recording
+            override val isPaused: Boolean get() = false
+            override fun start(outputFile: File): Result<Unit> {
+                recording = true
+                return Result.success(Unit)
+            }
+            override fun pause(): Result<Unit> = Result.success(Unit)
+            override fun resume(): Result<Unit> = Result.success(Unit)
+            override fun stop(): Result<File> {
+                recording = false
+                return Result.success(File(context.cacheDir, "test.m4a"))
+            }
+            override fun cancel() {
+                recording = false
+            }
+            override fun getMaxAmplitude(): Int = 0
+        }
+        val mockPlayer = object : com.example.audio.AudioPlayer {
+            override val isPlaying: Boolean get() = false
+            override val currentPosition: Int get() = 0
+            override val duration: Int get() = 0
+            override fun play(file: File, onCompletion: () -> Unit, onError: (String) -> Unit): Result<Unit> = Result.success(Unit)
+            override fun pause() {}
+            override fun resume() {}
+            override fun stop() {}
+            override fun seekTo(positionMs: Int) {}
+            override fun release() {}
+        }
+
+        val viewModel = com.example.ui.VoiceNoteViewModel(
+            application = app,
+            repository = repository,
+            audioRecorder = mockRecorder,
+            audioPlayer = mockPlayer,
+            audioFileManager = audioFileManager
+        )
+
+        val collectJob = launch(kotlinx.coroutines.Dispatchers.Unconfined) {
+            viewModel.uiState.collect {}
+        }
+
+        viewModel.startPushToTalkRecording()
+        assertTrue(mockRecorder.recording)
+
+        // Cancel via slide left
+        viewModel.cancelPushToTalkRecording()
+        assertFalse(mockRecorder.recording)
+        assertEquals("Recording discarded.", viewModel.currentInfoMessage)
+
+        collectJob.cancel()
+    }
+
+    @Test
+    fun viewModel_editAndUndoTranscription_updatesRepositoryAndMessages() = runBlocking<Unit> {
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        val mockRecorder = object : com.example.audio.AudioRecorder {
+            override val isRecording: Boolean get() = false
+            override val isPaused: Boolean get() = false
+            override fun start(outputFile: File): Result<Unit> = Result.success(Unit)
+            override fun pause(): Result<Unit> = Result.success(Unit)
+            override fun resume(): Result<Unit> = Result.success(Unit)
+            override fun stop(): Result<File> = Result.success(File(context.cacheDir, "test.m4a"))
+            override fun cancel() {}
+            override fun getMaxAmplitude(): Int = 0
+        }
+        val mockPlayer = object : com.example.audio.AudioPlayer {
+            override val isPlaying: Boolean get() = false
+            override val currentPosition: Int get() = 0
+            override val duration: Int get() = 0
+            override fun play(file: File, onCompletion: () -> Unit, onError: (String) -> Unit): Result<Unit> = Result.success(Unit)
+            override fun pause() {}
+            override fun resume() {}
+            override fun stop() {}
+            override fun seekTo(positionMs: Int) {}
+            override fun release() {}
+        }
+
+        val viewModel = com.example.ui.VoiceNoteViewModel(
+            application = app,
+            repository = repository,
+            audioRecorder = mockRecorder,
+            audioPlayer = mockPlayer,
+            audioFileManager = audioFileManager
+        )
+
+        val tempFile = File(context.filesDir, "test_vm_transcript.m4a")
+        tempFile.writeText("audio")
+        val saved = repository.saveNote(
+            title = "Test Transcript Note",
+            file = tempFile,
+            durationMs = 5000L,
+            transcription = "First Draft Transcription"
+        )
+
+        // Edit via ViewModel
+        viewModel.editNoteTranscription(saved.id, "Second Polished Draft")
+        for (i in 1..20) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            if (viewModel.currentInfoMessage != null) break
+            Thread.sleep(15)
+        }
+
+        val updated = repository.getNoteById(saved.id)
+        assertEquals("Second Polished Draft", updated?.transcription)
+        assertEquals("First Draft Transcription", updated?.previousTranscription)
+        assertEquals("Transcription updated", viewModel.currentInfoMessage)
+
+        // Undo via ViewModel
+        viewModel.clearInfoMessage()
+        viewModel.undoNoteTranscription(saved.id)
+        for (i in 1..20) {
+            org.robolectric.shadows.ShadowLooper.idleMainLooper()
+            if (viewModel.currentInfoMessage != null) break
+            Thread.sleep(15)
+        }
+
+        val reverted = repository.getNoteById(saved.id)
+        assertEquals("First Draft Transcription", reverted?.transcription)
+        assertEquals("Second Polished Draft", reverted?.previousTranscription)
+        assertEquals("Transcription reverted to previous version", viewModel.currentInfoMessage)
     }
 }
 

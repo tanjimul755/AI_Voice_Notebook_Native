@@ -16,10 +16,12 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Undo
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material.icons.filled.Subtitles
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -46,10 +49,13 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -97,9 +103,13 @@ fun NoteItemCard(
     onAiTranscribe: () -> Unit = {},
     onEditReminder: () -> Unit = {},
     onFormatTranscript: () -> Unit = {},
+    onSaveTranscriptionEdit: (String) -> Unit = {},
+    onUndoTranscriptionEdit: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     var showMenu by remember { mutableStateOf(false) }
+    var isEditingTranscript by remember { mutableStateOf(false) }
+    var editedTranscriptText by remember(note.transcription) { mutableStateOf(note.transcription ?: "") }
 
     val effectiveDuration = if (isCurrentPlaying && playbackDurationMs > 0) {
         playbackDurationMs
@@ -353,6 +363,40 @@ fun NoteItemCard(
                         }
                         if (!note.transcription.isNullOrBlank()) {
                             DropdownMenuItem(
+                                text = { Text("Edit Transcript") },
+                                leadingIcon = {
+                                    Icon(
+                                        Icons.Default.Edit,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                },
+                                onClick = {
+                                    showMenu = false
+                                    editedTranscriptText = note.transcription
+                                    isEditingTranscript = true
+                                },
+                                modifier = Modifier.testTag("edit_transcript_menu_item_${note.id}")
+                            )
+                            if (note.previousTranscription != null) {
+                                DropdownMenuItem(
+                                    text = { Text("Undo Transcript Edit") },
+                                    leadingIcon = {
+                                        Icon(
+                                            Icons.AutoMirrored.Filled.Undo,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    },
+                                    onClick = {
+                                        showMenu = false
+                                        onUndoTranscriptionEdit()
+                                    },
+                                    modifier = Modifier.testTag("undo_transcript_menu_item_${note.id}")
+                                )
+                            }
+                            DropdownMenuItem(
                                 text = { Text("Format Transcript (AI)") },
                                 leadingIcon = {
                                     Icon(
@@ -595,34 +639,167 @@ fun NoteItemCard(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                text = "TRANSCRIPT",
+                                text = if (isEditingTranscript) "EDIT TRANSCRIPT" else "TRANSCRIPT",
                                 style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
                                 color = MaterialTheme.colorScheme.primary
                             )
-                            IconButton(
-                                onClick = {
-                                    clipboardManager.setText(AnnotatedString(note.transcription))
-                                    copiedState = true
-                                },
-                                modifier = Modifier
-                                    .size(28.dp)
-                                    .testTag("copy_transcript_button_${note.id}")
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(4.dp)
                             ) {
-                                Icon(
-                                    imageVector = if (copiedState) Icons.Default.CheckCircle else Icons.Default.ContentCopy,
-                                    contentDescription = "Copy transcript",
-                                    tint = if (copiedState) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.size(16.dp)
-                                )
+                                // Undo Button: right next to edit and copy button
+                                val canUndo = note.previousTranscription != null || (isEditingTranscript && editedTranscriptText != note.transcription)
+                                IconButton(
+                                    onClick = {
+                                        if (isEditingTranscript) {
+                                            editedTranscriptText = note.previousTranscription ?: note.transcription
+                                        } else {
+                                            onUndoTranscriptionEdit()
+                                        }
+                                    },
+                                    enabled = canUndo,
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .testTag("undo_transcript_button_${note.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.Undo,
+                                        contentDescription = "Undo transcript edit",
+                                        tint = if (canUndo) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.38f)
+                                        },
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+
+                                // Edit Button: right next to copy button
+                                IconButton(
+                                    onClick = {
+                                        if (isEditingTranscript) {
+                                            editedTranscriptText = note.transcription
+                                            isEditingTranscript = false
+                                        } else {
+                                            editedTranscriptText = note.transcription
+                                            isEditingTranscript = true
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .testTag("edit_transcript_button_${note.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = if (isEditingTranscript) Icons.Default.Close else Icons.Default.Edit,
+                                        contentDescription = if (isEditingTranscript) "Cancel edit" else "Edit transcript",
+                                        tint = if (isEditingTranscript) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
+
+                                // Copy to Clipboard Button
+                                IconButton(
+                                    onClick = {
+                                        val textToCopy = if (isEditingTranscript) editedTranscriptText else note.transcription
+                                        clipboardManager.setText(AnnotatedString(textToCopy))
+                                        copiedState = true
+                                    },
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .testTag("copy_transcript_button_${note.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = if (copiedState) Icons.Default.CheckCircle else Icons.Default.ContentCopy,
+                                        contentDescription = "Copy transcript",
+                                        tint = if (copiedState) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                }
                             }
                         }
-                        Spacer(modifier = Modifier.height(4.dp))
-                        Text(
-                            text = note.transcription,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurface,
-                            modifier = Modifier.testTag("note_transcript_${note.id}")
-                        )
+
+                        if (isEditingTranscript) {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            OutlinedTextField(
+                                value = editedTranscriptText,
+                                onValueChange = { editedTranscriptText = it },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .testTag("transcript_edit_textfield_${note.id}"),
+                                textStyle = MaterialTheme.typography.bodyMedium,
+                                placeholder = { Text("Edit transcription...") },
+                                minLines = 2,
+                                maxLines = 8,
+                                shape = RoundedCornerShape(8.dp),
+                                colors = OutlinedTextFieldDefaults.colors(
+                                    focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                    unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
+                                )
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.End,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                TextButton(
+                                    onClick = {
+                                        editedTranscriptText = note.transcription
+                                        isEditingTranscript = false
+                                    },
+                                    modifier = Modifier.testTag("cancel_edit_transcript_button_${note.id}")
+                                ) {
+                                    Text("Cancel")
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Button(
+                                    onClick = {
+                                        if (editedTranscriptText.isNotBlank() && editedTranscriptText != note.transcription) {
+                                            onSaveTranscriptionEdit(editedTranscriptText)
+                                        }
+                                        isEditingTranscript = false
+                                    },
+                                    shape = RoundedCornerShape(8.dp),
+                                    modifier = Modifier.testTag("save_edit_transcript_button_${note.id}")
+                                ) {
+                                    Icon(Icons.Default.Check, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Save")
+                                }
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = note.transcription,
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.testTag("note_transcript_${note.id}")
+                            )
+                            if (!note.previousTranscription.isNullOrBlank()) {
+                                Spacer(modifier = Modifier.height(6.dp))
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .clickable { onUndoTranscriptionEdit() }
+                                        .padding(vertical = 2.dp, horizontal = 4.dp)
+                                        .testTag("transcript_undo_hint_${note.id}")
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.AutoMirrored.Filled.Undo,
+                                        contentDescription = null,
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(13.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Edited • Tap to undo",
+                                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Medium),
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
                     }
                 }
             } else {
